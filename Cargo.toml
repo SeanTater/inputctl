@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 evdev = "0.12"
 thiserror = "2"
+rand = "0.8"
 
 [dependencies.pyo3]
 version = "0.23"

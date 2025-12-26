@@ -1,7 +1,7 @@
 use evdev::Key;
 
 /// Mouse buttons
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
     Right,

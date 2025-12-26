@@ -1,0 +1,22 @@
+[package]
+name = "inputctl"
+version = "0.1.0"
+edition = "2021"
+description = "Linux input automation library using uinput"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+evdev = "0.12"
+thiserror = "2"
+
+[dependencies.pyo3]
+version = "0.23"
+optional = true
+features = ["extension-module"]
+
+[features]
+default = []
+python = ["pyo3"]

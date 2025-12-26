@@ -1,0 +1,11 @@
+# Rust
+target/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.so
+*.egg-info/
+dist/
+.python-version

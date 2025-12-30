@@ -1,0 +1,33 @@
+[package]
+name = "visionctl"
+version = "0.1.0"
+edition = "2021"
+description = "Screen capture and LLM vision analysis for Wayland"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "visionctl"
+path = "src/bin/visionctl.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+zbus = { version = "5.2", features = ["blocking"] }
+zvariant = "5.2"
+nix = { version = "0.29", features = ["fs"] }
+image = "0.25"
+inputctl = { path = "../inputctl" }
+
+[dependencies.pyo3]
+workspace = true
+optional = true
+
+[features]
+default = []
+python = ["pyo3"]

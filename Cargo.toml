@@ -1,23 +1,7 @@
-[package]
-name = "inputctl"
-version = "0.1.0"
-edition = "2021"
-description = "Linux input automation library using uinput"
-license = "MIT"
+[workspace]
+members = ["inputctl", "visionctl"]
+resolver = "2"
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-
-[dependencies]
-evdev = "0.12"
+[workspace.dependencies]
 thiserror = "2"
-rand = "0.8"
-
-[dependencies.pyo3]
-version = "0.23"
-optional = true
-features = ["extension-module"]
-
-[features]
-default = []
-python = ["pyo3"]
+pyo3 = { version = "0.23", features = ["extension-module"] }

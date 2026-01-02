@@ -1,248 +1,154 @@
-use visionctl::{VisionCtl, LlmConfig, Agent, detection};
-use std::io::{self, Read, Write};
+use clap::{Parser, Subcommand};
 use std::fs;
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use visionctl::{Agent, LlmConfig, VisionCtl};
+
+#[derive(Parser)]
+#[command(name = "visionctl")]
+#[command(about = "Vision-based GUI automation toolkit")]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    /// Question to ask LLM about the screen (default mode)
+    #[arg(trailing_var_arg = true)]
+    question: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run autonomous agent to achieve a goal
+    Agent {
+        /// Goal for the agent to accomplish
+        goal: String,
+    },
+    /// Guide cursor to target element and click
+    Target {
+        /// Description of the target element
+        description: String,
+    },
+    /// Capture screenshot to file
+    Screenshot {
+        /// Output path for screenshot
+        #[arg(default_value = "/tmp/visionctl_screenshot.png")]
+        output: String,
+    },
+    /// Find template image in screenshot
+    FindTemplate {
+        /// Template image to find
+        template: String,
+        /// Screenshot to search in (auto-captures if not provided)
+        #[arg(short, long)]
+        screenshot: Option<String>,
+        /// Confidence threshold (0.0 to 1.0)
+        #[arg(short, long, default_value = "0.8")]
+        threshold: f32,
+    },
+    /// Find template and click on best match
+    ClickTemplate {
+        /// Template image to find
+        template: String,
+        /// Confidence threshold (0.0 to 1.0)
+        #[arg(short, long, default_value = "0.8")]
+        threshold: f32,
+    },
+    /// Install KDE desktop file for screenshot permissions
+    InstallDesktopFile,
+}
 
 fn main() -> visionctl::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
 
-    // Check for subcommands
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "agent" => {
-                let goal = args.get(2).map(|s| s.as_str()).unwrap_or("");
-                if goal.is_empty() {
-                    eprintln!("Usage: visionctl agent <goal>");
-                    eprintln!("Example: visionctl agent \"switch to the haruna window\"");
-                    std::process::exit(1);
-                }
-                return run_agent(goal);
+    match cli.command {
+        Some(Commands::Agent { goal }) => run_agent(&goal),
+        Some(Commands::Target { description }) => run_target(&description),
+        Some(Commands::Screenshot { output }) => run_screenshot(&output),
+        Some(Commands::FindTemplate {
+            template,
+            screenshot,
+            threshold,
+        }) => run_find_template(&template, screenshot.as_deref(), threshold),
+        Some(Commands::ClickTemplate {
+            template,
+            threshold,
+        }) => run_click_template(&template, threshold),
+        Some(Commands::InstallDesktopFile) => install_desktop_file(),
+        None => {
+            // Default: query LLM with question
+            let question = if cli.question.is_empty() {
+                // Read from stdin
+                let mut buffer = String::new();
+                io::stdin().read_to_string(&mut buffer)?;
+                buffer.trim().to_string()
+            } else {
+                cli.question.join(" ")
+            };
+
+            if question.is_empty() {
+                // Show help if no question provided
+                use clap::CommandFactory;
+                Cli::command().print_help().ok();
+                std::process::exit(1);
             }
-            "target" => {
-                let target = args.get(2).map(|s| s.as_str()).unwrap_or("");
-                if target.is_empty() {
-                    eprintln!("Usage: visionctl target <description>");
-                    eprintln!("Example: visionctl target \"the minimize button of the Haruna window\"");
-                    std::process::exit(1);
-                }
-                return run_target(target);
-            }
-            "install-desktop-file" => {
-                return install_desktop_file();
-            }
-            "screenshot" => {
-                let output_path = args.get(2).map(|s| s.as_str()).unwrap_or("/tmp/visionctl_screenshot.png");
-                return run_screenshot(output_path);
-            }
-            "find-template" => {
-                let template = args.get(2).map(|s| s.as_str()).unwrap_or("");
-                if template.is_empty() {
-                    eprintln!("Usage: visionctl find-template <template.png> [screenshot.png] [threshold]");
-                    eprintln!("Example: visionctl find-template refs/orb.png /tmp/screen.png 0.7");
-                    eprintln!("         visionctl find-template refs/orb.png 0.7  # auto-screenshot");
-                    std::process::exit(1);
-                }
-                // Smart arg parsing: if arg3 looks like a number, it's threshold; else screenshot
-                let (screenshot, threshold) = match args.get(3).map(|s| s.as_str()) {
-                    Some(arg) if arg.parse::<f32>().is_ok() => {
-                        // arg3 is a number -> threshold, auto-screenshot
-                        (None, arg.parse().ok())
-                    }
-                    Some(screenshot_path) => {
-                        // arg3 is a path -> screenshot, arg4 is threshold
-                        (Some(screenshot_path), args.get(4).and_then(|s| s.parse().ok()))
-                    }
-                    None => (None, None),
-                };
-                return run_find_template(template, screenshot, threshold);
-            }
-            "click-template" => {
-                let template = args.get(2).map(|s| s.as_str()).unwrap_or("");
-                if template.is_empty() {
-                    eprintln!("Usage: visionctl click-template <template.png> [threshold]");
-                    eprintln!("Example: visionctl click-template refs/orb.png 0.7");
-                    std::process::exit(1);
-                }
-                let threshold = args.get(3).and_then(|s| s.parse().ok());
-                return run_click_template(template, threshold);
-            }
-            "find-text" => {
-                if args.len() < 3 {
-                    eprintln!("Usage: visionctl find-text <prompt> [prompt2] ... [--screenshot <path>] [--threshold <0-1>]");
-                    eprintln!("Example: visionctl find-text \"button\" \"icon\"");
-                    std::process::exit(1);
-                }
-                return run_find_text(&args[2..]);
-            }
-            "click-text" => {
-                let prompt = args.get(2).map(|s| s.as_str()).unwrap_or("");
-                if prompt.is_empty() {
-                    eprintln!("Usage: visionctl click-text <prompt> [threshold]");
-                    eprintln!("Example: visionctl click-text \"minimize button\" 0.3");
-                    std::process::exit(1);
-                }
-                let threshold = args.get(3).and_then(|s| s.parse().ok());
-                return run_click_text(prompt, threshold);
-            }
-            "--help" | "-h" => {
-                print_help();
-                return Ok(());
-            }
-            _ => {
-                // Fall through to original behavior (question query)
-            }
+
+            run_query(&question)
         }
     }
-
-    // Original behavior: query LLM with question
-    run_query()
 }
 
-fn install_desktop_file() -> visionctl::Result<()> {
-    println!("=== VisionCtl Desktop File Installer ===\n");
-
-    // Get the current executable path
-    let exe_path = std::env::current_exe()
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to get executable path: {}", e)))?;
-
-    let exe_path_str = exe_path.to_str()
-        .ok_or_else(|| visionctl::Error::ScreenshotFailed("Invalid executable path".to_string()))?;
-
-    println!("Detected executable: {}", exe_path_str);
-
-    // Get desktop file path
-    let home = std::env::var("HOME")
-        .map_err(|_| visionctl::Error::ScreenshotFailed("HOME environment variable not set".to_string()))?;
-
-    let desktop_dir = PathBuf::from(home).join(".local/share/applications");
-
-    // Create directory if it doesn't exist
-    fs::create_dir_all(&desktop_dir)
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to create desktop directory: {}", e)))?;
-
-    let desktop_file_path = desktop_dir.join("visionctl.desktop");
-
-    println!("Desktop file will be created at: {}\n", desktop_file_path.display());
-
-    // Generate desktop file content
-    let desktop_content = format!(r#"[Desktop Entry]
-Name=VisionCtl
-Comment=LLM-based GUI automation toolkit
-Exec={exe_path}
-Type=Application
-Terminal=true
-Categories=Development;Utility;
-X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
-"#, exe_path = exe_path_str);
-
-    // Check if file already exists
-    if desktop_file_path.exists() {
-        println!("⚠️  Desktop file already exists. Overwrite? [y/N]: ");
-        io::stdout().flush().unwrap();
-
-        let mut response = String::new();
-        io::stdin().read_line(&mut response).unwrap();
-
-        if !response.trim().eq_ignore_ascii_case("y") {
-            println!("Aborted.");
-            return Ok(());
-        }
-    }
-
-    // Write desktop file
-    fs::write(&desktop_file_path, desktop_content)
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to write desktop file: {}", e)))?;
-
-    println!("✓ Desktop file created successfully!");
-
-    // Update desktop database
-    println!("\nUpdating desktop database...");
-    let update_result = Command::new("update-desktop-database")
-        .arg(desktop_dir.to_str().unwrap())
-        .output();
-
-    match update_result {
-        Ok(output) if output.status.success() => {
-            println!("✓ Desktop database updated");
-        }
-        Ok(output) => {
-            println!("⚠️  Desktop database update failed (non-critical):");
-            println!("{}", String::from_utf8_lossy(&output.stderr));
-        }
-        Err(_) => {
-            println!("⚠️  'update-desktop-database' not found (non-critical)");
-            println!("   You may need to log out and back in for changes to take effect");
-        }
-    }
-
-    println!("\n=== Installation Complete ===");
-    println!("\nThe visionctl application is now authorized to take screenshots on KDE.");
-    println!("You can verify this by running:");
-    println!("  cargo run --example screenshot_test --release");
-    println!("\nNote: If you move the visionctl binary, you'll need to run this command again.");
-
-    Ok(())
-}
-
-fn run_query() -> visionctl::Result<()> {
-    // Read config from environment variables
-    let backend = std::env::var("VISIONCTL_BACKEND")
-        .unwrap_or_else(|_| "ollama".to_string());
-    let url = std::env::var("VISIONCTL_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let model = std::env::var("VISIONCTL_MODEL")
-        .unwrap_or_else(|_| "llava".to_string());
+fn get_llm_config() -> visionctl::Result<LlmConfig> {
+    let backend = std::env::var("VISIONCTL_BACKEND").unwrap_or_else(|_| "ollama".to_string());
+    let url =
+        std::env::var("VISIONCTL_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let model = std::env::var("VISIONCTL_MODEL").unwrap_or_else(|_| "llava".to_string());
 
     let config = match backend.to_lowercase().as_str() {
         "ollama" => LlmConfig::Ollama { url, model },
         "vllm" => LlmConfig::Vllm {
             url,
             model,
-            api_key: std::env::var("VISIONCTL_API_KEY").ok()
+            api_key: std::env::var("VISIONCTL_API_KEY").ok(),
         },
         "openai" => LlmConfig::OpenAI {
             url,
             model,
-            api_key: std::env::var("VISIONCTL_API_KEY")
-                .expect("VISIONCTL_API_KEY environment variable required for OpenAI backend"),
+            api_key: std::env::var("VISIONCTL_API_KEY").map_err(|_| {
+                visionctl::Error::LlmApiError("VISIONCTL_API_KEY required for OpenAI".to_string())
+            })?,
         },
         _ => {
-            eprintln!("Unknown backend: {}", backend);
-            eprintln!("Valid backends: ollama, vllm, openai");
-            std::process::exit(1);
+            return Err(visionctl::Error::LlmApiError(format!(
+                "Unknown backend: {}",
+                backend
+            )));
         }
     };
 
+    Ok(config)
+}
+
+fn run_query(question: &str) -> visionctl::Result<()> {
+    let config = get_llm_config()?;
     let ctl = VisionCtl::new(config)?;
 
-    // Read question from CLI args or stdin
-    let question = if let Some(q) = std::env::args().nth(1) {
-        q
-    } else {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer)?;
-        buffer.trim().to_string()
-    };
-
-    if question.is_empty() {
-        print_help();
-        std::process::exit(1);
-    }
-
-    // Capture screenshot with grid and save it for debugging
+    // Capture screenshot with grid and save for debugging
     let screenshot = ctl.screenshot_with_grid()?;
     let screenshot_path = "/tmp/visionctl_last_screenshot.png";
     fs::write(screenshot_path, &screenshot)
         .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
     eprintln!("Screenshot saved to: {}", screenshot_path);
 
-    // Query LLM (which will capture screenshot again, but that's okay)
-    let answer = ctl.ask(&question)?;
-    println!("{}", serde_json::json!({
-        "question": question,
-        "answer": answer
-    }));
+    let answer = ctl.ask(question)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "question": question,
+            "answer": answer
+        })
+    );
 
     Ok(())
 }
@@ -253,28 +159,21 @@ fn run_agent(goal: &str) -> visionctl::Result<()> {
 
     let config = get_llm_config()?;
 
-    let agent = Agent::new(config)?
-        .with_max_iterations(20)
-        .with_verbose(true);
+    let agent = Agent::new(config)?.with_max_iterations(20).with_verbose(true);
 
     let result = agent.run(goal)?;
 
     eprintln!("\n=== Agent Complete ===");
-    println!("{}", serde_json::json!({
-        "success": result.success,
-        "message": result.message,
-        "iterations": result.iterations,
-        "actions": result.actions_taken
-    }));
+    println!(
+        "{}",
+        serde_json::json!({
+            "success": result.success,
+            "message": result.message,
+            "iterations": result.iterations,
+            "actions": result.actions_taken
+        })
+    );
 
-    Ok(())
-}
-
-fn run_screenshot(output_path: &str) -> visionctl::Result<()> {
-    let screenshot = VisionCtl::screenshot()?;
-    fs::write(output_path, &screenshot)
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
-    eprintln!("Screenshot saved to: {} ({} bytes)", output_path, screenshot.len());
     Ok(())
 }
 
@@ -291,46 +190,36 @@ fn run_target(target: &str) -> visionctl::Result<()> {
     let result = agent.target(target)?;
 
     eprintln!("\n=== Target Complete ===");
-    println!("{}", serde_json::json!({
-        "success": result.success,
-        "message": result.message,
-        "iterations": result.iterations,
-        "actions": result.actions_taken
-    }));
+    println!(
+        "{}",
+        serde_json::json!({
+            "success": result.success,
+            "message": result.message,
+            "iterations": result.iterations,
+            "actions": result.actions_taken
+        })
+    );
 
     Ok(())
 }
 
-fn get_llm_config() -> visionctl::Result<LlmConfig> {
-    let backend = std::env::var("VISIONCTL_BACKEND")
-        .unwrap_or_else(|_| "ollama".to_string());
-    let url = std::env::var("VISIONCTL_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let model = std::env::var("VISIONCTL_MODEL")
-        .unwrap_or_else(|_| "llava".to_string());
-
-    let config = match backend.to_lowercase().as_str() {
-        "ollama" => LlmConfig::Ollama { url, model },
-        "vllm" => LlmConfig::Vllm {
-            url,
-            model,
-            api_key: std::env::var("VISIONCTL_API_KEY").ok()
-        },
-        "openai" => LlmConfig::OpenAI {
-            url,
-            model,
-            api_key: std::env::var("VISIONCTL_API_KEY")
-                .map_err(|_| visionctl::Error::LlmApiError("VISIONCTL_API_KEY required for OpenAI".to_string()))?,
-        },
-        _ => {
-            return Err(visionctl::Error::LlmApiError(format!("Unknown backend: {}", backend)));
-        }
-    };
-
-    Ok(config)
+fn run_screenshot(output_path: &str) -> visionctl::Result<()> {
+    let screenshot = VisionCtl::screenshot()?;
+    fs::write(output_path, &screenshot)
+        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
+    eprintln!(
+        "Screenshot saved to: {} ({} bytes)",
+        output_path,
+        screenshot.len()
+    );
+    Ok(())
 }
 
-fn run_find_template(template: &str, screenshot: Option<&str>, threshold: Option<f32>) -> visionctl::Result<()> {
+fn run_find_template(
+    template: &str,
+    screenshot: Option<&str>,
+    threshold: f32,
+) -> visionctl::Result<()> {
     // Take screenshot if not provided
     let screenshot_path = if let Some(path) = screenshot {
         path.to_string()
@@ -343,9 +232,12 @@ fn run_find_template(template: &str, screenshot: Option<&str>, threshold: Option
         screenshot_path.to_string()
     };
 
-    eprintln!("Finding template '{}' in '{}'...", template, screenshot_path);
+    eprintln!(
+        "Finding template '{}' in '{}' (threshold={})...",
+        template, screenshot_path, threshold
+    );
 
-    let results = detection::find_template(&screenshot_path, template, threshold)?;
+    let results = visionctl::detection::find_template(&screenshot_path, template, Some(threshold))?;
 
     // Output JSON
     println!("{}", serde_json::to_string_pretty(&results).unwrap());
@@ -366,24 +258,29 @@ fn run_find_template(template: &str, screenshot: Option<&str>, threshold: Option
     Ok(())
 }
 
-fn run_click_template(template: &str, threshold: Option<f32>) -> visionctl::Result<()> {
+fn run_click_template(template: &str, threshold: f32) -> visionctl::Result<()> {
     // Take screenshot
     let screenshot_path = "/tmp/visionctl_click_detect.png";
     let screenshot_data = VisionCtl::screenshot()?;
     fs::write(screenshot_path, &screenshot_data)
         .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
 
-    eprintln!("Finding template '{}'...", template);
+    eprintln!("Finding template '{}' (threshold={})...", template, threshold);
 
-    let results = detection::find_template(screenshot_path, template, threshold)?;
+    let results = visionctl::detection::find_template(screenshot_path, template, Some(threshold))?;
 
     if results.is_empty() {
         eprintln!("No matches found - cannot click");
-        return Err(visionctl::Error::ScreenshotFailed("No matches found".to_string()));
+        return Err(visionctl::Error::ScreenshotFailed(
+            "No matches found".to_string(),
+        ));
     }
 
     let best = &results[0];
-    eprintln!("Best match at ({}, {}) conf={:.3}", best.x, best.y, best.confidence);
+    eprintln!(
+        "Best match at ({}, {}) conf={:.3}",
+        best.x, best.y, best.confidence
+    );
     eprintln!("Clicking...");
 
     // Click using inputctl
@@ -393,147 +290,104 @@ fn run_click_template(template: &str, threshold: Option<f32>) -> visionctl::Resu
         .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to run inputctl: {}", e)))?;
 
     if !status.success() {
-        return Err(visionctl::Error::ScreenshotFailed("inputctl click failed".to_string()));
+        return Err(visionctl::Error::ScreenshotFailed(
+            "inputctl click failed".to_string(),
+        ));
     }
 
     eprintln!("Clicked at ({}, {})", best.x, best.y);
     Ok(())
 }
 
-fn run_find_text(args: &[String]) -> visionctl::Result<()> {
-    // Parse arguments: prompts [--screenshot path] [--threshold val]
-    let mut prompts: Vec<&str> = Vec::new();
-    let mut screenshot: Option<&str> = None;
-    let mut threshold: Option<f32> = None;
+fn install_desktop_file() -> visionctl::Result<()> {
+    println!("=== VisionCtl Desktop File Installer ===\n");
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--screenshot" | "-s" => {
-                if i + 1 < args.len() {
-                    screenshot = Some(&args[i + 1]);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            "--threshold" | "-t" => {
-                if i + 1 < args.len() {
-                    threshold = args[i + 1].parse().ok();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => {
-                prompts.push(&args[i]);
-                i += 1;
-            }
+    // Get the current executable path
+    let exe_path = std::env::current_exe()
+        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to get executable path: {}", e)))?;
+
+    let exe_path_str = exe_path
+        .to_str()
+        .ok_or_else(|| visionctl::Error::ScreenshotFailed("Invalid executable path".to_string()))?;
+
+    println!("Detected executable: {}", exe_path_str);
+
+    // Get desktop file path
+    let home = std::env::var("HOME")
+        .map_err(|_| visionctl::Error::ScreenshotFailed("HOME environment variable not set".to_string()))?;
+
+    let desktop_dir = PathBuf::from(home).join(".local/share/applications");
+
+    // Create directory if it doesn't exist
+    fs::create_dir_all(&desktop_dir)
+        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to create desktop directory: {}", e)))?;
+
+    let desktop_file_path = desktop_dir.join("visionctl.desktop");
+
+    println!(
+        "Desktop file will be created at: {}\n",
+        desktop_file_path.display()
+    );
+
+    // Generate desktop file content
+    let desktop_content = format!(
+        r#"[Desktop Entry]
+Name=VisionCtl
+Comment=LLM-based GUI automation toolkit
+Exec={exe_path}
+Type=Application
+Terminal=true
+Categories=Development;Utility;
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
+"#,
+        exe_path = exe_path_str
+    );
+
+    // Check if file already exists
+    if desktop_file_path.exists() {
+        print!("Desktop file already exists. Overwrite? [y/N]: ");
+        io::stdout().flush().unwrap();
+
+        let mut response = String::new();
+        io::stdin().read_line(&mut response).unwrap();
+
+        if !response.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
         }
     }
 
-    if prompts.is_empty() {
-        return Err(visionctl::Error::ScreenshotFailed("No prompts provided".to_string()));
-    }
+    // Write desktop file
+    fs::write(&desktop_file_path, desktop_content)
+        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to write desktop file: {}", e)))?;
 
-    // Take screenshot if not provided
-    let screenshot_path = if let Some(path) = screenshot {
-        path.to_string()
-    } else {
-        let screenshot_path = "/tmp/visionctl_detect.png";
-        let screenshot_data = VisionCtl::screenshot()?;
-        fs::write(screenshot_path, &screenshot_data)
-            .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
-        eprintln!("Screenshot saved to: {}", screenshot_path);
-        screenshot_path.to_string()
-    };
+    println!("Desktop file created successfully!");
 
-    eprintln!("Finding objects matching: {:?}", prompts);
+    // Update desktop database
+    println!("\nUpdating desktop database...");
+    let update_result = Command::new("update-desktop-database")
+        .arg(desktop_dir.to_str().unwrap())
+        .output();
 
-    let results = detection::find_by_text(&screenshot_path, &prompts, threshold)?;
-
-    // Output JSON
-    println!("{}", serde_json::to_string_pretty(&results).unwrap());
-
-    // Summary
-    if results.is_empty() {
-        eprintln!("\nNo detections found");
-    } else {
-        eprintln!("\nFound {} detection(s):", results.len());
-        for r in results.iter().take(5) {
-            let label = r.label.as_deref().unwrap_or("unknown");
-            eprintln!("  {}: ({}, {}) conf={:.3}", label, r.x, r.y, r.confidence);
+    match update_result {
+        Ok(output) if output.status.success() => {
+            println!("Desktop database updated");
         }
-        if results.len() > 5 {
-            eprintln!("  ... and {} more", results.len() - 5);
+        Ok(output) => {
+            println!("Desktop database update failed (non-critical):");
+            println!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+        Err(_) => {
+            println!("'update-desktop-database' not found (non-critical)");
+            println!("You may need to log out and back in for changes to take effect");
         }
     }
+
+    println!("\n=== Installation Complete ===");
+    println!("\nThe visionctl application is now authorized to take screenshots on KDE.");
+    println!("You can verify this by running:");
+    println!("  cargo run --example screenshot_test --release");
+    println!("\nNote: If you move the visionctl binary, you'll need to run this command again.");
 
     Ok(())
-}
-
-fn run_click_text(prompt: &str, threshold: Option<f32>) -> visionctl::Result<()> {
-    // Take screenshot
-    let screenshot_path = "/tmp/visionctl_click_detect.png";
-    let screenshot_data = VisionCtl::screenshot()?;
-    fs::write(screenshot_path, &screenshot_data)
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
-
-    eprintln!("Finding objects matching '{}'...", prompt);
-
-    let results = detection::find_by_text(screenshot_path, &[prompt], threshold)?;
-
-    if results.is_empty() {
-        eprintln!("No detections found - cannot click");
-        return Err(visionctl::Error::ScreenshotFailed("No detections found".to_string()));
-    }
-
-    let best = &results[0];
-    let label = best.label.as_deref().unwrap_or("object");
-    eprintln!("Best match '{}' at ({}, {}) conf={:.3}", label, best.x, best.y, best.confidence);
-    eprintln!("Clicking...");
-
-    // Click using inputctl
-    let status = Command::new("inputctl")
-        .args(["click", &best.x.to_string(), &best.y.to_string()])
-        .status()
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to run inputctl: {}", e)))?;
-
-    if !status.success() {
-        return Err(visionctl::Error::ScreenshotFailed("inputctl click failed".to_string()));
-    }
-
-    eprintln!("Clicked at ({}, {})", best.x, best.y);
-    Ok(())
-}
-
-fn print_help() {
-    println!("VisionCtl - LLM-based GUI automation toolkit\n");
-    println!("USAGE:");
-    println!("    visionctl <question>                    Query LLM about current screen");
-    println!("    visionctl agent <goal>                  Run autonomous agent to accomplish goal");
-    println!("    visionctl target <description>          Guide cursor to target and click it");
-    println!("    visionctl screenshot [path]             Capture screenshot");
-    println!("    visionctl find-template <img> [screen]  Find template image in screenshot");
-    println!("    visionctl click-template <img>          Find template and click it");
-    println!("    visionctl find-text <prompts...>        Find objects by text (YOLOE)");
-    println!("    visionctl click-text <prompt>           Find by text and click (YOLOE)");
-    println!("    visionctl install-desktop-file          Install KDE screenshot permission");
-    println!("    visionctl --help                        Show this help\n");
-    println!("EXAMPLES:");
-    println!("    visionctl \"What's on my screen?\"");
-    println!("    visionctl agent \"switch to the haruna window\"");
-    println!("    visionctl screenshot /tmp/test.png");
-    println!("    visionctl find-template refs/orb.png /tmp/screen.png 0.7");
-    println!("    visionctl click-template refs/minimize_button.png");
-    println!("    visionctl find-text \"button\" \"icon\"");
-    println!("    visionctl click-text \"minimize button\"\n");
-    println!("ENVIRONMENT:");
-    println!("    VISIONCTL_BACKEND    LLM backend (ollama, vllm, openai) [default: ollama]");
-    println!("    VISIONCTL_URL        Backend URL [default: http://localhost:11434]");
-    println!("    VISIONCTL_MODEL      Model name [default: llava]");
-    println!("    VISIONCTL_API_KEY    API key (required for openai backend)\n");
-    println!("SETUP:");
-    println!("    Template matching: cd visionctl/scripts && ./setup_detection.sh");
-    println!("    YOLOE (optional):  cd visionctl/scripts && uv sync --extra ml\n");
 }

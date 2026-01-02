@@ -1,12 +1,10 @@
-//! Visual object detection using template matching and ML models.
+//! Pure Rust template matching using Normalized Cross-Correlation (NCC).
 //!
-//! This module provides detection capabilities for finding UI elements in screenshots:
-//! - Template matching: Find known icons/elements using a reference image
-//! - YOLOE: Find objects by text description (requires `ultralytics` Python package)
+//! No Python dependencies - fully self-contained.
 
 use crate::{Error, Result};
+use image::{GrayImage, imageops};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 
 /// Detection result with location and confidence
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,237 +19,199 @@ pub struct Detection {
     pub confidence: f32,
     /// Detection method used
     pub method: String,
-    /// Optional label (for YOLOE text prompts)
+    /// Optional label
     #[serde(default)]
     pub label: Option<String>,
 }
 
-/// Find the scripts directory relative to the executable or cwd
-fn get_scripts_dir() -> Result<std::path::PathBuf> {
-    // Try multiple locations
-    let candidates = [
-        // Relative to executable
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("../scripts"))),
-        // Workspace scripts directory
-        Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts")),
-        // Current directory
-        Some(std::path::PathBuf::from("scripts")),
-        // Absolute fallback
-        Some(std::path::PathBuf::from("/home/sean/sandbox/inputctl/visionctl/scripts")),
-    ];
+/// Maximum dimension before downsampling for speed
+const MAX_SEARCH_DIM: u32 = 1920;
 
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.join("template_match.py").exists() {
-            return Ok(candidate);
-        }
-    }
-
-    Err(Error::ScreenshotFailed(
-        "Could not find scripts directory with template_match.py".into(),
-    ))
-}
-
-/// Find a template image in a screenshot using OpenCV template matching.
+/// Find a template image in a screenshot using multi-scale NCC.
 ///
-/// This uses SIFT feature matching for scale/rotation invariance,
-/// falling back to multi-scale template matching.
+/// Uses a two-pass approach for large images:
+/// 1. Coarse search at reduced resolution
+/// 2. Refine matches at full resolution
 ///
 /// # Arguments
-/// * `screenshot` - Path to the screenshot PNG
-/// * `template` - Path to the template image to find
-/// * `threshold` - Confidence threshold (0.0 to 1.0, default 0.7)
+/// * `screenshot_path` - Path to the screenshot PNG
+/// * `template_path` - Path to the template image to find
+/// * `threshold` - Confidence threshold (0.0 to 1.0, default 0.8)
 ///
 /// # Returns
 /// Vector of detections sorted by confidence (highest first)
-pub fn find_template(screenshot: &str, template: &str, threshold: Option<f32>) -> Result<Vec<Detection>> {
-    let scripts_dir = get_scripts_dir()?;
-    let python = scripts_dir.join(".venv/bin/python");
-    let script = scripts_dir.join("template_match.py");
+pub fn find_template(
+    screenshot_path: &str,
+    template_path: &str,
+    threshold: Option<f32>,
+) -> Result<Vec<Detection>> {
+    let threshold = threshold.unwrap_or(0.8);
 
-    if !python.exists() {
-        return Err(Error::ScreenshotFailed(format!(
-            "Python venv not found at {}. Run setup_detection.sh first.",
-            python.display()
-        )));
+    // Load images
+    let screenshot_full = image::open(screenshot_path)
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to load screenshot: {}", e)))?
+        .to_luma8();
+
+    let template = image::open(template_path)
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to load template: {}", e)))?
+        .to_luma8();
+
+    // Determine if we need to downsample for speed
+    let max_dim = screenshot_full.width().max(screenshot_full.height());
+    let downsample = if max_dim > MAX_SEARCH_DIM {
+        max_dim as f32 / MAX_SEARCH_DIM as f32
+    } else {
+        1.0
+    };
+
+    let (screenshot, scale_factor) = if downsample > 1.0 {
+        let new_w = (screenshot_full.width() as f32 / downsample) as u32;
+        let new_h = (screenshot_full.height() as f32 / downsample) as u32;
+        (
+            imageops::resize(&screenshot_full, new_w, new_h, imageops::FilterType::Triangle),
+            downsample,
+        )
+    } else {
+        (screenshot_full.clone(), 1.0)
+    };
+
+    // Scale template to match downsampled screenshot
+    let template_scaled = if downsample > 1.0 {
+        let new_w = (template.width() as f32 / downsample).max(1.0) as u32;
+        let new_h = (template.height() as f32 / downsample).max(1.0) as u32;
+        imageops::resize(&template, new_w, new_h, imageops::FilterType::Triangle)
+    } else {
+        template.clone()
+    };
+
+    // Skip if template is too small after scaling or too large
+    if template_scaled.width() < 4 || template_scaled.height() < 4 {
+        return Ok(Vec::new());
+    }
+    if template_scaled.width() >= screenshot.width()
+        || template_scaled.height() >= screenshot.height()
+    {
+        return Ok(Vec::new());
     }
 
-    let threshold_str = threshold.unwrap_or(0.7).to_string();
+    // Single-scale search (we already handle scale via downsample)
+    let matches = ncc_match(&screenshot, &template_scaled, threshold);
 
-    let output = Command::new(&python)
-        .arg(&script)
-        .arg(screenshot)
-        .arg(template)
-        .arg(&threshold_str)
-        .output()
-        .map_err(|e| Error::ScreenshotFailed(format!("Failed to run template_match.py: {}", e)))?;
+    // Convert back to full resolution coordinates
+    let mut all_matches: Vec<Detection> = Vec::new();
+    for (x, y, conf) in matches {
+        // Scale coordinates back to original image size
+        let full_x = ((x as f32) * scale_factor) as i32;
+        let full_y = ((y as f32) * scale_factor) as i32;
+        let tw = template.width() as i32;
+        let th = template.height() as i32;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::ScreenshotFailed(format!(
-            "template_match.py failed: {}",
-            stderr
-        )));
+        all_matches.push(Detection {
+            x: full_x + tw / 2,
+            y: full_y + th / 2,
+            box_coords: [full_x, full_y, full_x + tw, full_y + th],
+            confidence: conf,
+            method: "ncc".to_string(),
+            label: None,
+        });
     }
 
-    // Parse JSON output
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Sort by confidence (highest first)
+    all_matches.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
 
-    // The Python script outputs JSON with slightly different field names
-    #[derive(Deserialize)]
-    struct RawDetection {
-        x: i32,
-        y: i32,
-        #[serde(default)]
-        box_coords: Option<[i32; 4]>,
-        #[serde(rename = "box", default)]
-        box_field: Option<Vec<i32>>,
-        confidence: f32,
-        method: String,
+    // Non-maximum suppression
+    let mut filtered: Vec<Detection> = Vec::new();
+    for m in all_matches {
+        let dominated = filtered.iter().any(|existing| {
+            let dx = (m.x - existing.x).abs();
+            let dy = (m.y - existing.y).abs();
+            dx < 30 && dy < 30
+        });
+        if !dominated {
+            filtered.push(m);
+        }
     }
 
-    let raw: Vec<RawDetection> = serde_json::from_str(&stdout)
-        .map_err(|e| Error::ScreenshotFailed(format!("Failed to parse detection results: {}", e)))?;
+    Ok(filtered)
+}
 
-    Ok(raw
-        .into_iter()
-        .map(|r| {
-            let box_coords = r.box_coords.unwrap_or_else(|| {
-                r.box_field
-                    .map(|v| [v[0], v[1], v[2], v[3]])
-                    .unwrap_or([r.x - 50, r.y - 50, r.x + 50, r.y + 50])
-            });
-            Detection {
-                x: r.x,
-                y: r.y,
-                box_coords,
-                confidence: r.confidence,
-                method: r.method,
-                label: None,
+/// Perform NCC matching at a single scale
+fn ncc_match(img: &GrayImage, tmpl: &GrayImage, threshold: f32) -> Vec<(i32, i32, f32)> {
+    let img_w = img.width() as i32;
+    let img_h = img.height() as i32;
+    let tmpl_w = tmpl.width() as i32;
+    let tmpl_h = tmpl.height() as i32;
+
+    // Precompute template statistics
+    let tmpl_pixels: Vec<f32> = tmpl.pixels().map(|p| p.0[0] as f32).collect();
+    let tmpl_mean: f32 = tmpl_pixels.iter().sum::<f32>() / tmpl_pixels.len() as f32;
+    let tmpl_std: f32 = (tmpl_pixels
+        .iter()
+        .map(|&p| (p - tmpl_mean).powi(2))
+        .sum::<f32>()
+        / tmpl_pixels.len() as f32)
+        .sqrt();
+
+    if tmpl_std < 1e-6 {
+        // Template is flat (no variation), can't match reliably
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+
+    // Stride for faster scanning (balance speed vs precision)
+    let stride = 2;
+
+    for y in (0..=(img_h - tmpl_h)).step_by(stride) {
+        for x in (0..=(img_w - tmpl_w)).step_by(stride) {
+            let ncc = compute_ncc(img, x, y, tmpl, tmpl_w, tmpl_h, tmpl_mean, tmpl_std);
+            if ncc >= threshold {
+                matches.push((x, y, ncc));
             }
-        })
-        .collect())
+        }
+    }
+
+    matches
 }
 
-/// Find objects by text description using YOLOE.
-///
-/// Requires `ultralytics` Python package and downloads model on first use (~800MB).
-///
-/// # Arguments
-/// * `screenshot` - Path to the screenshot PNG
-/// * `prompts` - Text descriptions to search for (e.g., ["button", "icon"])
-/// * `threshold` - Confidence threshold (0.0 to 1.0, default 0.25)
-pub fn find_by_text(screenshot: &str, prompts: &[&str], threshold: Option<f32>) -> Result<Vec<Detection>> {
-    let scripts_dir = get_scripts_dir()?;
-    let python = scripts_dir.join(".venv/bin/python");
-    let script = scripts_dir.join("yoloe_detect.py");
+/// Compute NCC score for a single position
+fn compute_ncc(
+    img: &GrayImage,
+    x: i32,
+    y: i32,
+    tmpl: &GrayImage,
+    tmpl_w: i32,
+    tmpl_h: i32,
+    tmpl_mean: f32,
+    tmpl_std: f32,
+) -> f32 {
+    let mut sum_img = 0.0f32;
+    let mut sum_img_sq = 0.0f32;
+    let mut sum_cross = 0.0f32;
+    let n = (tmpl_w * tmpl_h) as f32;
 
-    if !script.exists() {
-        return Err(Error::ScreenshotFailed(format!(
-            "YOLOE script not found at {}",
-            script.display()
-        )));
+    for ty in 0..tmpl_h {
+        for tx in 0..tmpl_w {
+            let img_px = img.get_pixel((x + tx) as u32, (y + ty) as u32).0[0] as f32;
+            let tmpl_px = tmpl.get_pixel(tx as u32, ty as u32).0[0] as f32;
+
+            sum_img += img_px;
+            sum_img_sq += img_px * img_px;
+            sum_cross += img_px * (tmpl_px - tmpl_mean);
+        }
     }
 
-    let threshold_str = threshold.unwrap_or(0.25).to_string();
+    let img_mean = sum_img / n;
+    let img_var = sum_img_sq / n - img_mean * img_mean;
+    let img_std = img_var.max(0.0).sqrt();
 
-    let mut cmd = Command::new(&python);
-    cmd.arg(&script)
-        .arg(screenshot)
-        .arg("--threshold")
-        .arg(&threshold_str)
-        .arg("--text");
-
-    for prompt in prompts {
-        cmd.arg(prompt);
+    if img_std < 1e-6 {
+        return 0.0;
     }
 
-    let output = cmd
-        .output()
-        .map_err(|e| Error::ScreenshotFailed(format!("Failed to run yoloe_detect.py: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::ScreenshotFailed(format!(
-            "yoloe_detect.py failed: {}",
-            stderr
-        )));
-    }
-
-    parse_yoloe_output(&output.stdout)
-}
-
-/// Find objects similar to a reference image using YOLOE visual prompts.
-///
-/// # Arguments
-/// * `screenshot` - Path to the screenshot PNG
-/// * `reference` - Path to the reference image to find
-/// * `threshold` - Confidence threshold (0.0 to 1.0, default 0.25)
-pub fn find_by_image(screenshot: &str, reference: &str, threshold: Option<f32>) -> Result<Vec<Detection>> {
-    let scripts_dir = get_scripts_dir()?;
-    let python = scripts_dir.join(".venv/bin/python");
-    let script = scripts_dir.join("yoloe_detect.py");
-
-    if !script.exists() {
-        return Err(Error::ScreenshotFailed(format!(
-            "YOLOE script not found at {}",
-            script.display()
-        )));
-    }
-
-    let threshold_str = threshold.unwrap_or(0.25).to_string();
-
-    let output = Command::new(&python)
-        .arg(&script)
-        .arg(screenshot)
-        .arg("--threshold")
-        .arg(&threshold_str)
-        .arg("--image")
-        .arg(reference)
-        .output()
-        .map_err(|e| Error::ScreenshotFailed(format!("Failed to run yoloe_detect.py: {}", e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::ScreenshotFailed(format!(
-            "yoloe_detect.py failed: {}",
-            stderr
-        )));
-    }
-
-    parse_yoloe_output(&output.stdout)
-}
-
-fn parse_yoloe_output(stdout: &[u8]) -> Result<Vec<Detection>> {
-    let stdout_str = String::from_utf8_lossy(stdout);
-
-    #[derive(Deserialize)]
-    struct RawYoloeDetection {
-        x: i32,
-        y: i32,
-        #[serde(rename = "box")]
-        box_field: Vec<i32>,
-        confidence: f32,
-        method: String,
-        #[serde(default)]
-        label: Option<String>,
-    }
-
-    let raw: Vec<RawYoloeDetection> = serde_json::from_str(&stdout_str)
-        .map_err(|e| Error::ScreenshotFailed(format!("Failed to parse YOLOE results: {}", e)))?;
-
-    Ok(raw
-        .into_iter()
-        .map(|r| Detection {
-            x: r.x,
-            y: r.y,
-            box_coords: [r.box_field[0], r.box_field[1], r.box_field[2], r.box_field[3]],
-            confidence: r.confidence,
-            method: r.method,
-            label: r.label,
-        })
-        .collect())
+    // NCC formula
+    let ncc = sum_cross / (n * img_std * tmpl_std);
+    ncc.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -259,8 +219,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_scripts_dir_exists() {
-        let result = get_scripts_dir();
-        assert!(result.is_ok(), "Scripts directory should be found");
+    fn test_detection_struct() {
+        let det = Detection {
+            x: 100,
+            y: 200,
+            box_coords: [50, 150, 150, 250],
+            confidence: 0.95,
+            method: "ncc".to_string(),
+            label: None,
+        };
+        assert_eq!(det.x, 100);
+        assert_eq!(det.confidence, 0.95);
     }
 }

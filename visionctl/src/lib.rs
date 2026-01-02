@@ -1,6 +1,5 @@
 mod error;
 mod llm;
-mod screenshot;  // Old screenshot module (to be deprecated)
 mod primitives;
 mod actions;
 pub mod agent;

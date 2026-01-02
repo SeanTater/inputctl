@@ -26,6 +26,7 @@ imageproc = "0.25"
 ab_glyph = "0.2"
 inputctl = { path = "../inputctl" }
 tempfile = "3.14"
+clap = { version = "4", features = ["derive"] }
 
 [dependencies.pyo3]
 workspace = true

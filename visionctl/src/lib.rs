@@ -3,11 +3,15 @@ mod llm;
 mod screenshot;  // Old screenshot module (to be deprecated)
 mod primitives;
 mod actions;
+pub mod agent;
+pub mod detection;
 
 pub use error::{Error, Result};
 pub use llm::LlmConfig;
-pub use primitives::{GridConfig, GridStyle, LabelScheme, CursorPos};
+pub use primitives::{GridConfig, GridStyle, LabelScheme, CursorPos, GridMode};
 pub use actions::MouseButton;
+pub use agent::{Agent, AgentConfig, AgentResult};
+pub use detection::Detection;
 
 use llm::LlmClient;
 use primitives::{ScreenshotOptions, capture_screenshot, capture_screenshot_simple};
@@ -15,7 +19,7 @@ use primitives::{ScreenshotOptions, capture_screenshot, capture_screenshot_simpl
 /// Virtual vision controller for screen capture, LLM queries, and GUI automation
 pub struct VisionCtl {
     llm_client: Option<LlmClient>,
-    grid_config: GridConfig,
+    pub(crate) grid_config: GridConfig,
 }
 
 impl VisionCtl {
@@ -47,11 +51,21 @@ impl VisionCtl {
         capture_screenshot_simple()
     }
 
-    /// Capture screenshot with grid overlay
+    /// Capture screenshot with grid overlay and cursor marker
     pub fn screenshot_with_grid(&self) -> Result<Vec<u8>> {
         let options = ScreenshotOptions {
             grid: Some(self.grid_config.clone()),
-            mark_cursor: false,
+            mark_cursor: true,
+        };
+        let data = capture_screenshot(options)?;
+        Ok(data.png_bytes)
+    }
+
+    /// Capture screenshot with cursor marker only (no grid)
+    pub fn screenshot_with_cursor(&self) -> Result<Vec<u8>> {
+        let options = ScreenshotOptions {
+            grid: None,
+            mark_cursor: true,
         };
         let data = capture_screenshot(options)?;
         Ok(data.png_bytes)

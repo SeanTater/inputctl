@@ -1,5 +1,21 @@
 use crate::error::{Error, Result};
+use ab_glyph::{FontRef, PxScale};
 use image::{Rgba, RgbaImage};
+use imageproc::drawing::draw_text_mut;
+
+// Embedded font (DejaVu Sans Mono - small subset would be ideal, but we'll use a system font path)
+const FONT_DATA: &[u8] = include_bytes!("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf");
+
+/// Grid mode for two-level targeting
+#[derive(Clone, Debug, PartialEq)]
+pub enum GridMode {
+    /// Coarse grid: 200px cells, A-Z labels, for initial targeting
+    Coarse,
+    /// Fine grid: 50px cells, 1-4 labels, for precision within a coarse cell
+    Fine,
+    /// Legacy mode: 50px cells with full labels (A1, BH6, etc.)
+    Legacy,
+}
 
 /// Grid configuration for overlaying coordinate system on screenshots
 #[derive(Clone, Debug)]
@@ -7,14 +23,38 @@ pub struct GridConfig {
     pub cell_size: u32,
     pub style: GridStyle,
     pub label_scheme: LabelScheme,
+    pub mode: GridMode,
 }
 
 impl Default for GridConfig {
     fn default() -> Self {
         Self {
-            cell_size: 100,
+            cell_size: 200,  // Coarse by default
             style: GridStyle::Lines,
             label_scheme: LabelScheme::LetterNumber,
+            mode: GridMode::Coarse,
+        }
+    }
+}
+
+impl GridConfig {
+    /// Create a coarse grid config (200px cells)
+    pub fn coarse() -> Self {
+        Self {
+            cell_size: 200,
+            style: GridStyle::Lines,
+            label_scheme: LabelScheme::LetterNumber,
+            mode: GridMode::Coarse,
+        }
+    }
+
+    /// Create a fine grid config (50px cells, for cropped regions)
+    pub fn fine() -> Self {
+        Self {
+            cell_size: 50,
+            style: GridStyle::Lines,
+            label_scheme: LabelScheme::LetterNumber,
+            mode: GridMode::Fine,
         }
     }
 }
@@ -137,35 +177,147 @@ fn draw_grid_lines(image: &mut RgbaImage, config: &GridConfig, width: u32, heigh
 }
 
 fn draw_grid_labels(image: &mut RgbaImage, config: &GridConfig, width: u32, height: u32) {
-    // Note: Full text rendering requires a font rasterizer (like imageproc + rusttype)
-    // For now, we'll skip labels and can add them later if needed with imageproc crate
-    // The grid lines alone are sufficient for LLM to understand the coordinate system
-    // when combined with the cell references in the tool descriptions
+    let font = FontRef::try_from_slice(FONT_DATA).expect("Failed to load embedded font");
+    let label_color = Rgba([255u8, 255u8, 0u8, 255u8]); // Yellow for visibility
+    let bg_color = Rgba([0u8, 0u8, 0u8, 230u8]); // More opaque black background
 
-    let _ = (image, config, width, height); // Suppress unused warnings
+    let cols = (width / config.cell_size) as usize;
+    let rows = (height / config.cell_size) as usize;
+
+    match config.mode {
+        GridMode::Coarse => {
+            // Large, very readable labels for coarse grid
+            let scale = PxScale::from(36.0);
+            for row in 0..rows {
+                for col in 0..cols {
+                    let label = format!("{}{}", column_to_letter(col), row + 1);
+                    // Center the label in the cell
+                    let x = (col as u32 * config.cell_size + 8) as i32;
+                    let y = (row as u32 * config.cell_size + 8) as i32;
+                    draw_label_with_bg(image, &font, scale, &label, x, y, label_color, bg_color);
+                }
+            }
+        }
+        GridMode::Fine => {
+            // Simple 1-4 numbering for fine grid within cropped region
+            let scale = PxScale::from(24.0);
+            for row in 0..rows.min(4) {
+                for col in 0..cols.min(4) {
+                    let label = format!("{}-{}", col + 1, row + 1);
+                    let x = (col as u32 * config.cell_size + 4) as i32;
+                    let y = (row as u32 * config.cell_size + 4) as i32;
+                    draw_label_with_bg(image, &font, scale, &label, x, y, label_color, bg_color);
+                }
+            }
+        }
+        GridMode::Legacy => {
+            // Original behavior: in-cell labels
+            let scale = PxScale::from(20.0);
+            for row in 0..rows {
+                for col in 0..cols {
+                    let label = format!("{}{}", column_to_letter(col), row + 1);
+                    let x = (col as u32 * config.cell_size + 3) as i32;
+                    let y = (row as u32 * config.cell_size + 3) as i32;
+                    draw_label_with_bg(image, &font, scale, &label, x, y, label_color, bg_color);
+                }
+            }
+        }
+    }
+}
+
+fn draw_label_with_bg(
+    image: &mut RgbaImage,
+    font: &FontRef,
+    scale: PxScale,
+    label: &str,
+    x: i32,
+    y: i32,
+    fg_color: Rgba<u8>,
+    bg_color: Rgba<u8>,
+) {
+    // Scale dimensions based on font size
+    let char_width = (scale.x * 0.6) as u32;  // Approximate character width
+    let label_width = (label.len() as u32 * char_width) + 6;
+    let label_height = (scale.y as u32) + 4;
+
+    // Draw background
+    for dy in 0..label_height {
+        for dx in 0..label_width {
+            let px = (x as u32).saturating_add(dx);
+            let py = (y as u32).saturating_add(dy);
+            if let Some(pixel) = image.get_pixel_mut_checked(px, py) {
+                *pixel = blend_pixel(*pixel, bg_color);
+            }
+        }
+    }
+
+    // Draw text
+    draw_text_mut(image, fg_color, x + 2, y + 2, scale, font, label);
 }
 
 fn draw_cursor_mark(image: &mut RgbaImage, pos: &CursorPos) {
-    let mark_color = Rgba([255u8, 0u8, 0u8, 200u8]); // Semi-transparent red
-    let size = 10u32; // Crosshair size
+    let mark_color = Rgba([255u8, 0u8, 0u8, 255u8]); // Solid red
+    let outline_color = Rgba([255u8, 255u8, 255u8, 255u8]); // White outline
+    let size = 60u32; // Large crosshair size
+    let thickness = 4u32; // Line thickness
 
     let x = pos.x as u32;
     let y = pos.y as u32;
 
-    // Draw crosshair
+    // Draw thick crosshair with white outline for visibility
     // Horizontal line
     for dx in 0..size {
         let px = x.saturating_sub(size / 2).saturating_add(dx);
-        if let Some(pixel) = image.get_pixel_mut_checked(px, y) {
-            *pixel = mark_color;
+        for t in 0..thickness {
+            // White outline (above and below)
+            if let Some(pixel) = image.get_pixel_mut_checked(px, y.saturating_sub(thickness / 2 + 1).saturating_add(t)) {
+                if t == 0 || t == thickness - 1 {
+                    *pixel = outline_color;
+                }
+            }
+            // Red center
+            if let Some(pixel) = image.get_pixel_mut_checked(px, y.saturating_sub(thickness / 2).saturating_add(t)) {
+                *pixel = mark_color;
+            }
         }
     }
 
     // Vertical line
     for dy in 0..size {
         let py = y.saturating_sub(size / 2).saturating_add(dy);
-        if let Some(pixel) = image.get_pixel_mut_checked(x, py) {
-            *pixel = mark_color;
+        for t in 0..thickness {
+            // White outline (left and right)
+            if let Some(pixel) = image.get_pixel_mut_checked(x.saturating_sub(thickness / 2 + 1).saturating_add(t), py) {
+                if t == 0 || t == thickness - 1 {
+                    *pixel = outline_color;
+                }
+            }
+            // Red center
+            if let Some(pixel) = image.get_pixel_mut_checked(x.saturating_sub(thickness / 2).saturating_add(t), py) {
+                *pixel = mark_color;
+            }
+        }
+    }
+
+    // Draw a circle around cursor for extra visibility
+    let radius = 20u32;
+    for angle in 0..360 {
+        let rad = (angle as f32) * std::f32::consts::PI / 180.0;
+        let cx = x as i32 + (radius as f32 * rad.cos()) as i32;
+        let cy = y as i32 + (radius as f32 * rad.sin()) as i32;
+        if cx >= 0 && cy >= 0 {
+            // White outline
+            if let Some(pixel) = image.get_pixel_mut_checked(cx as u32, cy as u32) {
+                *pixel = outline_color;
+            }
+            // Red inner
+            let cx2 = x as i32 + ((radius - 1) as f32 * rad.cos()) as i32;
+            let cy2 = y as i32 + ((radius - 1) as f32 * rad.sin()) as i32;
+            if cx2 >= 0 && cy2 >= 0 {
+                if let Some(pixel) = image.get_pixel_mut_checked(cx2 as u32, cy2 as u32) {
+                    *pixel = mark_color;
+                }
+            }
         }
     }
 }

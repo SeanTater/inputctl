@@ -20,6 +20,15 @@ pub use inputctl::MouseButton;
 /// Easing curve for smooth movement (re-exported from inputctl)
 pub use inputctl::Curve;
 
+/// Click at current cursor position
+pub fn click(button: MouseButton) -> Result<()> {
+    let ctl = get_input_ctl()?;
+    let mut ctl = ctl.lock().unwrap();
+
+    ctl.click(button)
+        .map_err(|e| Error::ScreenshotFailed(format!("Mouse click failed: {}", e)))
+}
+
 /// Click at pixel coordinates
 ///
 /// Finds current cursor position, moves to target, and clicks
@@ -59,6 +68,22 @@ pub fn move_to_pixel(x: i32, y: i32, smooth: bool) -> Result<()> {
     // Calculate relative movement
     let dx = x - cursor.x;
     let dy = y - cursor.y;
+
+    if smooth {
+        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 2.0)
+            .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
+    } else {
+        ctl.move_mouse(dx, dy)
+            .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
+    }
+
+    Ok(())
+}
+
+/// Move mouse by relative pixels (direction-based)
+pub fn move_relative(dx: i32, dy: i32, smooth: bool) -> Result<()> {
+    let ctl = get_input_ctl()?;
+    let mut ctl = ctl.lock().unwrap();
 
     if smooth {
         ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 2.0)

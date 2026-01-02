@@ -22,7 +22,10 @@ zbus = { version = "5.2", features = ["blocking"] }
 zvariant = "5.2"
 nix = { version = "0.29", features = ["fs"] }
 image = "0.25"
+imageproc = "0.25"
+ab_glyph = "0.2"
 inputctl = { path = "../inputctl" }
+tempfile = "3.14"
 
 [dependencies.pyo3]
 workspace = true

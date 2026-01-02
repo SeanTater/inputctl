@@ -81,14 +81,12 @@ pub fn capture_screenshot(options: ScreenshotOptions) -> Result<ScreenshotData> 
     file.read_exact(&mut raw_data)
         .map_err(|e| Error::ScreenshotFailed(format!("Failed to read image data: {}", e)))?;
 
-    // Convert ARGB32 to RGBA8
+    // Convert BGRA32 to RGBA8
     let mut img = argb_to_rgba_image(&raw_data, width, height, stride)?;
 
     // Get cursor position if needed
     let cursor_pos = if options.mark_cursor || options.grid.is_some() {
-        // We'll implement cursor finding in next step
-        // For now, return None
-        None
+        crate::primitives::cursor::find_cursor().ok()
     } else {
         None
     };
@@ -130,19 +128,19 @@ fn extract_u32(reply: &HashMap<String, Value>, key: &str) -> Result<u32> {
         .map_err(|_| Error::ScreenshotFailed(format!("Invalid type for {} in reply", key)))
 }
 
-// Helper: Convert ARGB32 to RGBA8 image
-fn argb_to_rgba_image(argb: &[u8], width: u32, height: u32, stride: u32) -> Result<RgbaImage> {
-    // Convert ARGB to RGBA
+// Helper: Convert BGRA32 to RGBA8 image
+fn argb_to_rgba_image(bgra: &[u8], width: u32, height: u32, stride: u32) -> Result<RgbaImage> {
+    // Convert BGRA to RGBA (KWin provides BGRA format on Linux)
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         let row_start = (y * stride) as usize;
         for x in 0..width {
             let pixel_start = row_start + (x * 4) as usize;
-            // ARGB -> RGBA: [A, R, G, B] -> [R, G, B, A]
-            rgba.push(argb[pixel_start + 1]); // R
-            rgba.push(argb[pixel_start + 2]); // G
-            rgba.push(argb[pixel_start + 3]); // B
-            rgba.push(argb[pixel_start + 0]); // A
+            // BGRA -> RGBA: [B, G, R, A] -> [R, G, B, A]
+            rgba.push(bgra[pixel_start + 2]); // R
+            rgba.push(bgra[pixel_start + 1]); // G
+            rgba.push(bgra[pixel_start + 0]); // B
+            rgba.push(bgra[pixel_start + 3]); // A
         }
     }
 

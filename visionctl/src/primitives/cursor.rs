@@ -1,5 +1,11 @@
 use crate::error::{Error, Result};
-use crate::primitives::grid::{CursorPos, GridConfig};
+use crate::primitives::grid::{CursorPos, GridConfig, pixel_to_grid};
+use std::fs;
+use std::process::Command;
+use std::time::Duration;
+use tempfile::NamedTempFile;
+use zbus::blocking::Connection;
+use zvariant::ObjectPath;
 
 /// Find cursor position using KWin
 ///
@@ -9,24 +15,90 @@ pub fn find_cursor() -> Result<CursorPos> {
 }
 
 /// Find cursor position and optionally map to grid cell
-pub fn find_cursor_with_grid(_grid_config: Option<&GridConfig>) -> Result<CursorPos> {
-    // TODO: Implement using kdotool crate or KWin DBus scripting
-    // For now, return placeholder that will be implemented in next phase
-    //
-    // Implementation options:
-    // 1. Add kdotool crate dependency and use it
-    // 2. Implement full KWin DBus scripting (complex)
-    //
-    // Placeholder returns error for now
-    Err(Error::ScreenshotFailed(
-        "Cursor finding not yet implemented - add kdotool dependency or implement KWin scripting".into()
-    ))
-}
+pub fn find_cursor_with_grid(grid_config: Option<&GridConfig>) -> Result<CursorPos> {
+    // Generate a unique marker for this query
+    let marker = format!("VISIONCTL_CURSOR_{}", std::process::id());
 
-// TODO: When implementing, the code should:
-// 1. Query cursor position from KWin
-// 2. If grid_config provided, calculate grid cell using pixel_to_grid()
-// 3. Return CursorPos with x, y, and optional grid_cell
+    // Create temp script that prints cursor position with marker
+    let script_file = NamedTempFile::with_suffix(".js")
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to create script file: {}", e)))?;
+
+    let script_content = format!(r#"
+        var pos = workspace.cursorPos;
+        print("{}_" + pos.x + "_" + pos.y);
+    "#, marker);
+
+    fs::write(script_file.path(), &script_content)
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to write script: {}", e)))?;
+
+    // Connect to DBus and load the script
+    let conn = Connection::session()
+        .map_err(|e| Error::ScreenshotFailed(format!("DBus connection failed: {}", e)))?;
+
+    let proxy = zbus::blocking::Proxy::new(
+        &conn,
+        "org.kde.KWin",
+        "/Scripting",
+        "org.kde.kwin.Scripting",
+    ).map_err(|e| Error::ScreenshotFailed(format!("KWin Scripting interface not found: {}", e)))?;
+
+    // Load the script
+    let script_path = script_file.path().to_string_lossy().to_string();
+    let script_id: i32 = proxy
+        .call_method("loadScript", &(&script_path,))
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to load script: {}", e)))?
+        .body()
+        .deserialize()
+        .map_err(|e| Error::ScreenshotFailed(format!("Invalid script ID: {}", e)))?;
+
+    // Run the script
+    let script_path_str = format!("/Scripting/Script{}", script_id);
+    let script_obj_path = ObjectPath::try_from(script_path_str.as_str())
+        .map_err(|e| Error::ScreenshotFailed(format!("Invalid script path: {}", e)))?;
+
+    let script_proxy = zbus::blocking::Proxy::new(
+        &conn,
+        "org.kde.KWin",
+        script_obj_path,
+        "org.kde.kwin.Script",
+    ).map_err(|e| Error::ScreenshotFailed(format!("Script proxy failed: {}", e)))?;
+
+    script_proxy.call_method("run", &())
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to run script: {}", e)))?;
+
+    // Give script time to execute
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Read from journalctl
+    let output = Command::new("journalctl")
+        .args(["--user", "-u", "plasma-kwin_wayland", "-n", "50", "--no-pager", "-o", "cat"])
+        .output()
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to run journalctl: {}", e)))?;
+
+    let journal_output = String::from_utf8_lossy(&output.stdout);
+
+    // Unload the script
+    let _ = proxy.call_method("unloadScript", &(&script_path,));
+
+    // Find our marker in the output
+    for line in journal_output.lines().rev() {
+        if line.contains(&marker) {
+            // Parse "MARKER_x_y" format
+            let parts: Vec<&str> = line.split('_').collect();
+            if parts.len() >= 3 {
+                let x: i32 = parts[parts.len() - 2].parse()
+                    .map_err(|_| Error::ScreenshotFailed(format!("Invalid x in: {}", line)))?;
+                let y: i32 = parts[parts.len() - 1].parse()
+                    .map_err(|_| Error::ScreenshotFailed(format!("Invalid y in: {}", line)))?;
+
+                let grid_cell = grid_config.map(|config| pixel_to_grid(x, y, config));
+                return Ok(CursorPos { x, y, grid_cell });
+            }
+        }
+    }
+
+    Err(Error::ScreenshotFailed(format!("Cursor position not found in journal (marker: {})", marker)))
+}
 
 #[cfg(test)]
 mod tests {

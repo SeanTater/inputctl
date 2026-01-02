@@ -1,13 +1,48 @@
 use crate::error::{Error, Result};
+use crate::llm::tools::ToolDefinition;
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub enum LlmConfig {
     Ollama { url: String, model: String },
     Vllm { url: String, model: String, api_key: Option<String> },
     OpenAI { url: String, model: String, api_key: String },
+}
+
+/// Message in a conversation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+}
+
+/// Tool call from the model
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub function: FunctionCall,
+}
+
+/// Function call details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: Value,
+}
+
+/// Response from chat_with_tools
+#[derive(Debug, Clone)]
+pub struct ChatResponse {
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 pub struct LlmClient {
@@ -17,8 +52,15 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(config: LlmConfig) -> Result<Self> {
+        // Use a very long timeout for slow CPU inference (30 minutes)
+        // This is especially important for vision models on CPU
+        let client = Client::builder()
+            .timeout(Duration::from_secs(1800))
+            .build()
+            .map_err(|e| Error::LlmApiError(format!("Failed to create HTTP client: {}", e)))?;
+
         Ok(Self {
-            client: Client::new(),
+            client,
             config,
         })
     }
@@ -37,6 +79,116 @@ impl LlmClient {
                 self.query_openai_compatible(url, model, Some(api_key.as_str()), &image_base64, prompt)
             }
         }
+    }
+
+    /// Chat with tool calling support
+    pub fn chat_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        image: Option<&[u8]>,
+    ) -> Result<ChatResponse> {
+        match &self.config {
+            LlmConfig::Ollama { url, model } => {
+                self.chat_ollama_with_tools(url, model, messages, tools, image)
+            }
+            _ => Err(Error::LlmApiError("Tool calling only supported for Ollama backend".to_string())),
+        }
+    }
+
+    fn chat_ollama_with_tools(
+        &self,
+        url: &str,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        image: Option<&[u8]>,
+    ) -> Result<ChatResponse> {
+        let endpoint = format!("{}/api/chat", url.trim_end_matches('/'));
+
+        // Convert tools to Ollama format
+        let ollama_tools: Vec<Value> = tools.iter().map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema
+                }
+            })
+        }).collect();
+
+        // Build messages array
+        let mut ollama_messages: Vec<Value> = messages.iter().map(|m| {
+            let mut msg = json!({ "role": m.role });
+            if let Some(content) = &m.content {
+                msg["content"] = json!(content);
+            }
+            if let Some(images) = &m.images {
+                msg["images"] = json!(images);
+            }
+            if let Some(tool_calls) = &m.tool_calls {
+                msg["tool_calls"] = json!(tool_calls);
+            }
+            msg
+        }).collect();
+
+        // Add image to the last user message if provided
+        if let Some(img_bytes) = image {
+            let b64 = general_purpose::STANDARD.encode(img_bytes);
+            // Find the last user message and add the image
+            for msg in ollama_messages.iter_mut().rev() {
+                if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
+                    msg["images"] = json!([b64]);
+                    break;
+                }
+            }
+        }
+
+        let body = json!({
+            "model": model,
+            "messages": ollama_messages,
+            "tools": ollama_tools,
+            "stream": false
+        });
+
+        let response = self.client
+            .post(&endpoint)
+            .json(&body)
+            .send()?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::LlmApiError(format!("Ollama chat API error {}: {}", status, error_text)));
+        }
+
+        let json: Value = response.json()?;
+
+        // Parse the response
+        let message = json.get("message")
+            .ok_or_else(|| Error::LlmApiError("No message in Ollama response".to_string()))?;
+
+        let content = message.get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Parse tool calls if present
+        let tool_calls = message.get("tool_calls")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter().filter_map(|tc| {
+                    let function = tc.get("function")?;
+                    let name = function.get("name")?.as_str()?.to_string();
+                    // Arguments can be a string or object - Ollama returns it as object
+                    let arguments = function.get("arguments").cloned().unwrap_or(json!({}));
+                    Some(ToolCall {
+                        function: FunctionCall { name, arguments }
+                    })
+                }).collect()
+            });
+
+        Ok(ChatResponse { content, tool_calls })
     }
 
     fn query_ollama(&self, url: &str, model: &str, image: &str, prompt: &str) -> Result<String> {

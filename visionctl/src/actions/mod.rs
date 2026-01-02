@@ -2,6 +2,6 @@ pub mod input;
 
 pub use input::{
     MouseButton,
-    click_at_grid, move_to_grid,
+    click, click_at_grid, move_to_grid, move_relative,
     type_text, key_press,
 };

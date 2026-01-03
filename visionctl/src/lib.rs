@@ -7,7 +7,7 @@ pub mod detection;
 
 pub use error::{Error, Result};
 pub use llm::LlmConfig;
-pub use primitives::{GridConfig, GridStyle, LabelScheme, CursorPos, GridMode};
+pub use primitives::{GridConfig, GridStyle, LabelScheme, CursorPos, GridMode, find_cursor};
 pub use actions::MouseButton;
 pub use agent::{Agent, AgentConfig, AgentResult};
 pub use detection::Detection;

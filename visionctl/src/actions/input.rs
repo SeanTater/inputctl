@@ -43,8 +43,8 @@ pub fn click_at_pixel(x: i32, y: i32, button: MouseButton) -> Result<()> {
     let dx = x - cursor.x;
     let dy = y - cursor.y;
 
-    // Move smoothly to target
-    ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 2.0)
+    // Move smoothly to target with no noise for precision
+    ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0)
         .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
 
     // Small delay before clicking
@@ -70,7 +70,8 @@ pub fn move_to_pixel(x: i32, y: i32, smooth: bool) -> Result<()> {
     let dy = y - cursor.y;
 
     if smooth {
-        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 2.0)
+        // No noise for precision targeting
+        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0)
             .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
     } else {
         ctl.move_mouse(dx, dy)
@@ -86,7 +87,8 @@ pub fn move_relative(dx: i32, dy: i32, smooth: bool) -> Result<()> {
     let mut ctl = ctl.lock().unwrap();
 
     if smooth {
-        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 2.0)
+        // No noise for precision targeting
+        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0)
             .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
     } else {
         ctl.move_mouse(dx, dy)
@@ -117,25 +119,23 @@ pub fn type_text(text: &str) -> Result<()> {
         .map_err(|e| Error::ScreenshotFailed(format!("Typing failed: {}", e)))
 }
 
-/// Press a key
+/// Press a key by name
 ///
-/// For now, this is a simplified implementation that only handles single ASCII characters.
-/// Full key support (enter, escape, etc.) will be added later.
+/// Supports special keys: "enter", "space", "tab", "backspace", "escape",
+/// modifiers like "ctrl", "alt", "shift", "super", navigation keys like
+/// "up", "down", "left", "right", function keys "f1"-"f12", and single
+/// characters "a"-"z", "0"-"9".
 pub fn key_press(key: &str) -> Result<()> {
     let ctl = get_input_ctl()?;
     let mut ctl = ctl.lock().unwrap();
 
-    // Simple implementation: if it's a single character, type it
-    // TODO: Add support for special keys (enter, escape, tab, etc.)
-    if key.len() == 1 {
-        ctl.type_text(key)
-            .map_err(|e| Error::ScreenshotFailed(format!("Key press failed: {}", e)))
-    } else {
-        // For now, return error for non-character keys
-        Err(Error::ScreenshotFailed(
-            format!("Special key '{}' not yet supported - only single characters work for now", key)
-        ))
-    }
+    // Parse the key name to evdev Key
+    let evdev_key = inputctl::parse_key_name(key)
+        .map_err(|e| Error::ScreenshotFailed(format!("Invalid key name '{}': {}", key, e)))?;
+
+    // Press and release the key
+    ctl.key_click(evdev_key)
+        .map_err(|e| Error::ScreenshotFailed(format!("Key press failed: {}", e)))
 }
 
 #[cfg(test)]

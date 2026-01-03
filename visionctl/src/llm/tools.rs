@@ -134,6 +134,59 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
                 "required": ["success", "message"]
             })
         },
+        ToolDefinition {
+            name: "list_templates".to_string(),
+            description: "List all available template icons. Use this to discover what icons you can search for with find_template or click_template.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            })
+        },
+        ToolDefinition {
+            name: "find_template".to_string(),
+            description: "Find a template icon on screen and report its location. Returns coordinates, confidence, and number of matches. Use when you need to know where an icon is without clicking it.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Template name without .png extension (e.g., 'gwenview'). Use list_templates() to see available names."
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": "Confidence threshold 0.0-1.0 (default 0.8). Lower = more permissive matching.",
+                        "default": 0.8
+                    }
+                },
+                "required": ["name"]
+            })
+        },
+        ToolDefinition {
+            name: "click_template".to_string(),
+            description: "Find a template icon on screen and click it. Best for clicking small taskbar icons or UI elements that are hard to target with the grid. Combines find + click in one action.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Template name without .png extension (e.g., 'gwenview')"
+                    },
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": "Mouse button to click",
+                        "default": "left"
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": "Confidence threshold 0.0-1.0 (default 0.8)",
+                        "default": 0.8
+                    }
+                },
+                "required": ["name"]
+            })
+        },
     ]
 }
 
@@ -211,13 +264,11 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
 
             // Support both percent (new) and pixels (legacy)
             let (pixels, is_percent) = if let Some(pct) = params.get("percent").and_then(|v| v.as_i64()) {
-                // Convert percentage to pixels (assume ~4K ultrawide: 6912x2160)
-                // TODO: Get actual screen dimensions dynamically
-                let screen_width = 6912i64;
-                let screen_height = 2160i64;
+                // Convert percentage to pixels using actual screen dimensions
+                let dims = crate::primitives::get_screen_dimensions()?;
                 let px = match direction {
-                    "left" | "right" => (screen_width * pct / 100) as i32,
-                    "up" | "down" => (screen_height * pct / 100) as i32,
+                    "left" | "right" => (dims.width as i64 * pct / 100) as i32,
+                    "up" | "down" => (dims.height as i64 * pct / 100) as i32,
                     _ => 100,
                 };
                 (px, true)
@@ -377,6 +428,130 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 "message": message,
                 "is_target_reached": true
             }))
+        }
+        "list_templates" => {
+            use crate::detection;
+            let templates = detection::list_available_templates()?;
+            Ok(json!({
+                "success": true,
+                "templates": templates,
+                "count": templates.len()
+            }))
+        }
+        "find_template" => {
+            use crate::detection;
+
+            let name = params.get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'name' parameter".into()))?;
+
+            let threshold = params.get("threshold")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+                .unwrap_or(0.8);
+
+            // Take screenshot
+            let screenshot = crate::VisionCtl::screenshot()?;
+            let temp_path = "/tmp/visionctl_template_search.png";
+            std::fs::write(temp_path, &screenshot)
+                .map_err(|e| crate::Error::ScreenshotFailed(format!("Failed to write screenshot: {}", e)))?;
+
+            // Find template file
+            let template_path = detection::find_template_file(name)?;
+
+            // Search for template
+            let detections = detection::find_template(
+                temp_path,
+                template_path.to_str().unwrap(),
+                Some(threshold)
+            )?;
+
+            // Clean up
+            let _ = std::fs::remove_file(temp_path);
+
+            if detections.is_empty() {
+                Ok(json!({
+                    "success": false,
+                    "found": false,
+                    "message": format!("Template '{}' not found on screen (threshold: {})", name, threshold)
+                }))
+            } else {
+                let best = &detections[0];
+                Ok(json!({
+                    "success": true,
+                    "found": true,
+                    "x": best.x,
+                    "y": best.y,
+                    "confidence": best.confidence,
+                    "num_matches": detections.len(),
+                    "message": format!("Found {} match(es) for '{}'", detections.len(), name)
+                }))
+            }
+        }
+        "click_template" => {
+            use crate::detection;
+            use crate::actions::{MouseButton, click_at_pixel};
+
+            let name = params.get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'name' parameter".into()))?;
+
+            let button_str = params.get("button")
+                .and_then(|v| v.as_str())
+                .unwrap_or("left");
+
+            let button = match button_str {
+                "left" => MouseButton::Left,
+                "right" => MouseButton::Right,
+                "middle" => MouseButton::Middle,
+                _ => MouseButton::Left,
+            };
+
+            let threshold = params.get("threshold")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+                .unwrap_or(0.8);
+
+            // Take screenshot
+            let screenshot = crate::VisionCtl::screenshot()?;
+            let temp_path = "/tmp/visionctl_template_search.png";
+            std::fs::write(temp_path, &screenshot)
+                .map_err(|e| crate::Error::ScreenshotFailed(format!("Failed to write screenshot: {}", e)))?;
+
+            // Find template file
+            let template_path = detection::find_template_file(name)?;
+
+            // Search for template
+            let detections = detection::find_template(
+                temp_path,
+                template_path.to_str().unwrap(),
+                Some(threshold)
+            )?;
+
+            // Clean up
+            let _ = std::fs::remove_file(temp_path);
+
+            if detections.is_empty() {
+                Ok(json!({
+                    "success": false,
+                    "message": format!("Template '{}' not found on screen (threshold: {})", name, threshold)
+                }))
+            } else {
+                let best = &detections[0];
+
+                // Click at template location
+                click_at_pixel(best.x, best.y, button)?;
+
+                Ok(json!({
+                    "success": true,
+                    "x": best.x,
+                    "y": best.y,
+                    "confidence": best.confidence,
+                    "num_matches": detections.len(),
+                    "message": format!("Clicked template '{}' at ({}, {}) with {:.2} confidence",
+                        name, best.x, best.y, best.confidence)
+                }))
+            }
         }
         _ => {
             Err(crate::Error::ScreenshotFailed(format!("Unknown tool: {}", name)))

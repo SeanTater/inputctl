@@ -10,6 +10,12 @@ pub enum Error {
 
     #[error("failed to emit input event")]
     EmitFailed,
+
+    #[error("device error: {0}")]
+    DeviceError(String),
+
+    #[error("unknown key name: {0}")]
+    UnknownKey(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

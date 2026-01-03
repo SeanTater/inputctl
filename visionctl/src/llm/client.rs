@@ -92,7 +92,12 @@ impl LlmClient {
             LlmConfig::Ollama { url, model } => {
                 self.chat_ollama_with_tools(url, model, messages, tools, image)
             }
-            _ => Err(Error::LlmApiError("Tool calling only supported for Ollama backend".to_string())),
+            LlmConfig::Vllm { url, model, api_key } => {
+                self.chat_openai_compatible_with_tools(url, model, api_key.as_deref(), messages, tools, image)
+            }
+            LlmConfig::OpenAI { url, model, api_key } => {
+                self.chat_openai_compatible_with_tools(url, model, Some(api_key.as_str()), messages, tools, image)
+            }
         }
     }
 
@@ -182,6 +187,141 @@ impl LlmClient {
                     let name = function.get("name")?.as_str()?.to_string();
                     // Arguments can be a string or object - Ollama returns it as object
                     let arguments = function.get("arguments").cloned().unwrap_or(json!({}));
+                    Some(ToolCall {
+                        function: FunctionCall { name, arguments }
+                    })
+                }).collect()
+            });
+
+        Ok(ChatResponse { content, tool_calls })
+    }
+
+    fn chat_openai_compatible_with_tools(
+        &self,
+        url: &str,
+        model: &str,
+        api_key: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        image: Option<&[u8]>,
+    ) -> Result<ChatResponse> {
+        let endpoint = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
+
+        // Convert tools to OpenAI format
+        let openai_tools: Vec<Value> = tools.iter().map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema
+                }
+            })
+        }).collect();
+
+        // Build messages array - OpenAI format uses content array with text and image_url
+        let mut openai_messages: Vec<Value> = Vec::new();
+
+        for (i, m) in messages.iter().enumerate() {
+            let is_last_user_msg = m.role == "user" &&
+                messages.iter().skip(i + 1).all(|msg| msg.role != "user");
+
+            // If this is the last user message and we have an image, use multimodal content
+            if m.role == "user" && is_last_user_msg && image.is_some() {
+                let mut content_parts = Vec::new();
+
+                // Add text content
+                if let Some(text) = &m.content {
+                    content_parts.push(json!({
+                        "type": "text",
+                        "text": text
+                    }));
+                }
+
+                // Add image
+                if let Some(img_bytes) = image {
+                    let b64 = general_purpose::STANDARD.encode(img_bytes);
+                    content_parts.push(json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/png;base64,{}", b64)
+                        }
+                    }));
+                }
+
+                openai_messages.push(json!({
+                    "role": m.role,
+                    "content": content_parts
+                }));
+            } else {
+                // Regular message format
+                let mut msg = json!({ "role": m.role });
+                if let Some(content) = &m.content {
+                    msg["content"] = json!(content);
+                }
+                if let Some(tool_calls) = &m.tool_calls {
+                    // Convert tool calls to OpenAI format with IDs
+                    let tc_array: Vec<Value> = tool_calls.iter().enumerate().map(|(idx, tc)| {
+                        json!({
+                            "id": format!("call_{}", idx),
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".to_string())
+                            }
+                        })
+                    }).collect();
+                    msg["tool_calls"] = json!(tc_array);
+                }
+                openai_messages.push(msg);
+            }
+        }
+
+        let body = json!({
+            "model": model,
+            "messages": openai_messages,
+            "tools": openai_tools,
+        });
+
+        let mut request = self.client.post(&endpoint).json(&body);
+
+        if let Some(key) = api_key {
+            request = request.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let response = request.send()?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::LlmApiError(format!("OpenAI chat API error {}: {}", status, error_text)));
+        }
+
+        let json: Value = response.json()?;
+
+        // Parse the response - OpenAI format nests message under choices[0]
+        let message = json.get("choices")
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("message"))
+            .ok_or_else(|| Error::LlmApiError("No message in OpenAI response".to_string()))?;
+
+        let content = message.get("content")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        // Parse tool calls if present
+        let tool_calls = message.get("tool_calls")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter().filter_map(|tc| {
+                    let function = tc.get("function")?;
+                    let name = function.get("name")?.as_str()?.to_string();
+                    // OpenAI returns arguments as a JSON string, parse it
+                    let arguments = function.get("arguments")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or(json!({}));
                     Some(ToolCall {
                         function: FunctionCall { name, arguments }
                     })

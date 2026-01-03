@@ -82,11 +82,10 @@ fn smooth_noise(t: f64, control_points: &[(f64, f64)]) -> f64 {
     v0 + (v1 - v0) * smooth_t
 }
 
-/// Generate movement steps with interpolation and smooth noise
+/// Generate waypoints as cumulative offsets from start position
 ///
-/// Creates a series of small movements that smoothly transition from
-/// start to end using the specified curve, with low-frequency smooth noise
-/// for natural-looking variation.
+/// Used for servo-controlled movement where feedback corrects for acceleration.
+/// Returns positions along the trajectory, not deltas.
 ///
 /// # Arguments
 /// * `dx` - Total horizontal movement (positive = right)
@@ -96,33 +95,36 @@ fn smooth_noise(t: f64, control_points: &[(f64, f64)]) -> f64 {
 /// * `noise_amount` - Maximum deviation in pixels (e.g., 2.0 = ±2 pixels). Use 0.0 for no noise.
 ///
 /// # Returns
-/// Vector of (dx, dy) movement deltas
-pub fn generate_steps(dx: i32, dy: i32, duration: f64, curve: Curve, noise_amount: f64) -> Vec<(i32, i32)> {
+/// Vector of (offset_x, offset_y) cumulative positions from start
+pub fn generate_waypoints(
+    dx: i32,
+    dy: i32,
+    duration: f64,
+    curve: Curve,
+    noise_amount: f64,
+) -> Vec<(i32, i32)> {
     let mut rng = rand::thread_rng();
 
-    // Target 125 Hz (8ms intervals) for smooth movement
-    // Minimum 10 steps to ensure smoothness even for short durations
-    let steps = (duration * 125.0).ceil().max(10.0) as usize;
-    let mut movements = Vec::with_capacity(steps);
+    // No compensation needed - servo feedback handles acceleration!
+    // Target 30 Hz (33ms intervals) for smooth appearance
+    let steps = (duration * 30.0).ceil().max(10.0) as usize;
+    let mut waypoints = Vec::with_capacity(steps);
 
     // Generate control points for smooth low-frequency noise
-    // Control point every ~25 steps (200ms) for natural variation
     let control_interval = 25;
     let num_controls = (steps / control_interval).max(2) + 2;
     let mut control_points_x = Vec::with_capacity(num_controls);
     let mut control_points_y = Vec::with_capacity(num_controls);
 
-    // First and last control points at 0 for smooth start/end
     for i in 0..num_controls {
         let t = i as f64 / (num_controls - 1) as f64;
-        // Apply configurable noise amount
         let noise_x = if i == 0 || i == num_controls - 1 {
-            0.0 // Start and end at target
+            0.0
         } else {
             rng.gen_range(-noise_amount..=noise_amount)
         };
         let noise_y = if i == 0 || i == num_controls - 1 {
-            0.0 // Start and end at target
+            0.0
         } else {
             rng.gen_range(-noise_amount..=noise_amount)
         };
@@ -130,40 +132,26 @@ pub fn generate_steps(dx: i32, dy: i32, duration: f64, curve: Curve, noise_amoun
         control_points_y.push((t, noise_y));
     }
 
-    let mut emitted_x = 0;
-    let mut emitted_y = 0;
-
     for i in 0..steps {
         let t = (i + 1) as f64 / steps as f64;
         let progress = interpolate(t, &curve);
 
-        // Apply smooth low-frequency noise
         let noise_x = smooth_noise(t, &control_points_x);
         let noise_y = smooth_noise(t, &control_points_y);
 
-        // Calculate target position with smooth noise
-        let target_x = (dx as f64 * progress + noise_x).round() as i32;
-        let target_y = (dy as f64 * progress + noise_y).round() as i32;
+        // Cumulative position (offset from start)
+        let pos_x = (dx as f64 * progress + noise_x).round() as i32;
+        let pos_y = (dy as f64 * progress + noise_y).round() as i32;
 
-        // Calculate delta from last emitted position
-        let step_x = target_x - emitted_x;
-        let step_y = target_y - emitted_y;
-
-        emitted_x = target_x;
-        emitted_y = target_y;
-
-        movements.push((step_x, step_y));
+        waypoints.push((pos_x, pos_y));
     }
 
-    // Final correction to ensure we hit target exactly
-    let correction_x = dx - emitted_x;
-    let correction_y = dy - emitted_y;
-    if let Some(last) = movements.last_mut() {
-        last.0 += correction_x;
-        last.1 += correction_y;
+    // Ensure final waypoint hits exact target
+    if let Some(last) = waypoints.last_mut() {
+        *last = (dx, dy);
     }
 
-    movements
+    waypoints
 }
 
 #[cfg(test)]
@@ -197,68 +185,77 @@ mod tests {
     }
 
     #[test]
-    fn generate_steps_reaches_target() {
-        let steps = generate_steps(100, 50, 0.5, Curve::Linear, 2.0);
+    fn generate_waypoints_reaches_target() {
+        let waypoints = generate_waypoints(100, 50, 0.5, Curve::Linear, 2.0);
 
-        // Sum all steps to verify we reach the exact target
-        let total_x: i32 = steps.iter().map(|(x, _)| x).sum();
-        let total_y: i32 = steps.iter().map(|(_, y)| y).sum();
-
-        assert_eq!(total_x, 100);
-        assert_eq!(total_y, 50);
+        // Final waypoint should be exact target
+        let (final_x, final_y) = waypoints.last().unwrap();
+        assert_eq!(*final_x, 100);
+        assert_eq!(*final_y, 50);
     }
 
     #[test]
-    fn generate_steps_minimum_count() {
+    fn generate_waypoints_minimum_count() {
         // Even short durations should have minimum steps
-        let steps = generate_steps(10, 5, 0.01, Curve::Linear, 2.0);
-        assert!(steps.len() >= 10);
+        let waypoints = generate_waypoints(10, 5, 0.01, Curve::Linear, 2.0);
+        assert!(waypoints.len() >= 10);
     }
 
     #[test]
-    fn generate_steps_scales_with_duration() {
-        let steps_short = generate_steps(100, 50, 0.5, Curve::Linear, 2.0);
-        let steps_long = generate_steps(100, 50, 1.0, Curve::Linear, 2.0);
+    fn generate_waypoints_scales_with_duration() {
+        let waypoints_short = generate_waypoints(100, 50, 0.5, Curve::Linear, 2.0);
+        let waypoints_long = generate_waypoints(100, 50, 1.0, Curve::Linear, 2.0);
 
-        // Longer duration should produce more steps
-        assert!(steps_long.len() > steps_short.len());
+        // Longer duration should produce more waypoints
+        assert!(waypoints_long.len() > waypoints_short.len());
 
-        // Should be approximately 125 Hz
-        assert!((steps_long.len() as f64 - 125.0).abs() < 5.0);
+        // Should be approximately 30 Hz
+        assert!((waypoints_long.len() as f64 - 30.0).abs() < 5.0);
     }
 
     #[test]
-    fn generate_steps_negative_movement() {
-        let steps = generate_steps(-100, -50, 0.5, Curve::Linear, 2.0);
+    fn generate_waypoints_negative_movement() {
+        let waypoints = generate_waypoints(-100, -50, 0.5, Curve::Linear, 2.0);
 
-        let total_x: i32 = steps.iter().map(|(x, _)| x).sum();
-        let total_y: i32 = steps.iter().map(|(_, y)| y).sum();
-
-        assert_eq!(total_x, -100);
-        assert_eq!(total_y, -50);
+        // Final waypoint should be exact target
+        let (final_x, final_y) = waypoints.last().unwrap();
+        assert_eq!(*final_x, -100);
+        assert_eq!(*final_y, -50);
     }
 
     #[test]
-    fn generate_steps_ease_in_out_reaches_target() {
-        let steps = generate_steps(200, 100, 1.0, Curve::EaseInOut, 2.0);
+    fn generate_waypoints_ease_in_out_reaches_target() {
+        let waypoints = generate_waypoints(200, 100, 1.0, Curve::EaseInOut, 2.0);
 
-        let total_x: i32 = steps.iter().map(|(x, _)| x).sum();
-        let total_y: i32 = steps.iter().map(|(_, y)| y).sum();
-
-        assert_eq!(total_x, 200);
-        assert_eq!(total_y, 100);
+        // Final waypoint should be exact target
+        let (final_x, final_y) = waypoints.last().unwrap();
+        assert_eq!(*final_x, 200);
+        assert_eq!(*final_y, 100);
     }
 
     #[test]
-    fn generate_steps_no_noise() {
-        let steps = generate_steps(100, 50, 1.0, Curve::Linear, 0.0);
+    fn generate_waypoints_no_noise() {
+        let waypoints = generate_waypoints(100, 50, 1.0, Curve::Linear, 0.0);
 
-        // With no noise, should still reach target
-        let total_x: i32 = steps.iter().map(|(x, _)| x).sum();
-        let total_y: i32 = steps.iter().map(|(_, y)| y).sum();
+        // Final waypoint should be exact target
+        let (final_x, final_y) = waypoints.last().unwrap();
+        assert_eq!(*final_x, 100);
+        assert_eq!(*final_y, 50);
+    }
 
-        assert_eq!(total_x, 100);
-        assert_eq!(total_y, 50);
+    #[test]
+    fn generate_waypoints_cumulative() {
+        let waypoints = generate_waypoints(100, 50, 0.5, Curve::Linear, 0.0);
+
+        // Waypoints should be monotonically increasing (cumulative)
+        let mut prev_x = 0;
+        let mut prev_y = 0;
+        for (x, y) in waypoints {
+            assert!(x >= prev_x, "X should be monotonically increasing");
+            assert!(y >= prev_y, "Y should be monotonically increasing");
+            prev_x = x;
+            prev_y = y;
+        }
     }
 
     #[test]

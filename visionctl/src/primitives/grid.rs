@@ -423,7 +423,11 @@ mod tests {
 
     #[test]
     fn test_pixel_to_grid() {
-        let config = GridConfig::default();
+        // Use cell_size=100 for these tests
+        let config = GridConfig {
+            cell_size: 100,
+            ..GridConfig::default()
+        };
         assert_eq!(pixel_to_grid(50, 50, &config), "A1");
         assert_eq!(pixel_to_grid(150, 50, &config), "B1");
         assert_eq!(pixel_to_grid(50, 150, &config), "A2");
@@ -432,7 +436,11 @@ mod tests {
 
     #[test]
     fn test_grid_to_pixel() {
-        let config = GridConfig::default();
+        // Use cell_size=100 for these tests
+        let config = GridConfig {
+            cell_size: 100,
+            ..GridConfig::default()
+        };
         assert_eq!(grid_to_pixel("A1", &config).unwrap(), (50, 50));
         assert_eq!(grid_to_pixel("B1", &config).unwrap(), (150, 50));
         assert_eq!(grid_to_pixel("A2", &config).unwrap(), (50, 150));

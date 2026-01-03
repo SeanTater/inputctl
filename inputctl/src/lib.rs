@@ -1,24 +1,124 @@
+mod cursor;
+mod cursor_daemon;
 mod device;
 pub mod error;
 mod interpolation;
 pub mod keyboard;
 pub mod mouse;
 
+use cursor::CursorState;
 use evdev::uinput::VirtualDevice;
-use evdev::{InputEvent, Key, RelativeAxisType};
+use evdev::{InputEvent, RelativeAxisType};
+pub use evdev::Key;
 use std::collections::HashSet;
-use std::thread;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub use error::{Error, Result};
 pub use interpolation::Curve;
 pub use mouse::MouseButton;
 
+/// Parse a key name string into an evdev Key
+///
+/// Supports:
+/// - Special keys: "enter", "space", "tab", "backspace", "escape"
+/// - Modifiers: "shift", "ctrl", "alt", "super"
+/// - Navigation: "up", "down", "left", "right", "home", "end", "pageup", "pagedown"
+/// - Function keys: "f1" through "f12"
+/// - Single characters: "a"-"z", "0"-"9"
+pub fn parse_key_name(name: &str) -> Result<Key> {
+    let key = match name.to_lowercase().as_str() {
+        "enter" | "return" => Key::KEY_ENTER,
+        "space" => Key::KEY_SPACE,
+        "tab" => Key::KEY_TAB,
+        "backspace" => Key::KEY_BACKSPACE,
+        "escape" | "esc" => Key::KEY_ESC,
+        "shift" | "lshift" => Key::KEY_LEFTSHIFT,
+        "rshift" => Key::KEY_RIGHTSHIFT,
+        "ctrl" | "control" | "lctrl" => Key::KEY_LEFTCTRL,
+        "rctrl" => Key::KEY_RIGHTCTRL,
+        "alt" | "lalt" => Key::KEY_LEFTALT,
+        "ralt" => Key::KEY_RIGHTALT,
+        "super" | "meta" | "win" => Key::KEY_LEFTMETA,
+        "up" => Key::KEY_UP,
+        "down" => Key::KEY_DOWN,
+        "left" => Key::KEY_LEFT,
+        "right" => Key::KEY_RIGHT,
+        "home" => Key::KEY_HOME,
+        "end" => Key::KEY_END,
+        "pageup" => Key::KEY_PAGEUP,
+        "pagedown" => Key::KEY_PAGEDOWN,
+        "insert" => Key::KEY_INSERT,
+        "delete" => Key::KEY_DELETE,
+        "f1" => Key::KEY_F1,
+        "f2" => Key::KEY_F2,
+        "f3" => Key::KEY_F3,
+        "f4" => Key::KEY_F4,
+        "f5" => Key::KEY_F5,
+        "f6" => Key::KEY_F6,
+        "f7" => Key::KEY_F7,
+        "f8" => Key::KEY_F8,
+        "f9" => Key::KEY_F9,
+        "f10" => Key::KEY_F10,
+        "f11" => Key::KEY_F11,
+        "f12" => Key::KEY_F12,
+        // Single characters
+        s if s.len() == 1 => {
+            let c = s.chars().next().unwrap();
+            match c.to_ascii_lowercase() {
+                'a' => Key::KEY_A,
+                'b' => Key::KEY_B,
+                'c' => Key::KEY_C,
+                'd' => Key::KEY_D,
+                'e' => Key::KEY_E,
+                'f' => Key::KEY_F,
+                'g' => Key::KEY_G,
+                'h' => Key::KEY_H,
+                'i' => Key::KEY_I,
+                'j' => Key::KEY_J,
+                'k' => Key::KEY_K,
+                'l' => Key::KEY_L,
+                'm' => Key::KEY_M,
+                'n' => Key::KEY_N,
+                'o' => Key::KEY_O,
+                'p' => Key::KEY_P,
+                'q' => Key::KEY_Q,
+                'r' => Key::KEY_R,
+                's' => Key::KEY_S,
+                't' => Key::KEY_T,
+                'u' => Key::KEY_U,
+                'v' => Key::KEY_V,
+                'w' => Key::KEY_W,
+                'x' => Key::KEY_X,
+                'y' => Key::KEY_Y,
+                'z' => Key::KEY_Z,
+                '0' => Key::KEY_0,
+                '1' => Key::KEY_1,
+                '2' => Key::KEY_2,
+                '3' => Key::KEY_3,
+                '4' => Key::KEY_4,
+                '5' => Key::KEY_5,
+                '6' => Key::KEY_6,
+                '7' => Key::KEY_7,
+                '8' => Key::KEY_8,
+                '9' => Key::KEY_9,
+                _ => return Err(Error::UnknownKey(name.to_string())),
+            }
+        }
+        _ => return Err(Error::UnknownKey(name.to_string())),
+    };
+    Ok(key)
+}
+
 /// Virtual input device for keyboard and mouse automation
 pub struct InputCtl {
     device: VirtualDevice,
     held_keys: HashSet<Key>,
     held_buttons: HashSet<MouseButton>,
+    // Cursor tracking (optional - only on KDE/KWin)
+    cursor_state: Arc<CursorState>,
+    cursor_thread: Option<JoinHandle<()>>,
 }
 
 impl InputCtl {
@@ -26,13 +126,113 @@ impl InputCtl {
     ///
     /// Note: This takes ~1 second as the kernel needs time to recognize the device.
     /// Requires access to /dev/uinput (typically root or input group membership).
+    ///
+    /// Also starts a background thread for fast cursor position tracking via KWin.
     pub fn new() -> Result<Self> {
         let device = device::create_device()?;
-        Ok(Self {
+
+        // Start cursor tracking daemon
+        let cursor_state = Arc::new(CursorState::new());
+        let state_clone = cursor_state.clone();
+        let pid = std::process::id();
+
+        let cursor_thread = thread::spawn(move || {
+            if let Err(e) = cursor_daemon::run_daemon(state_clone, pid) {
+                // Log error but don't fail - cursor tracking is optional
+                eprintln!("[inputctl] Cursor daemon failed (KWin not available?): {}", e);
+            }
+        });
+
+        let mut ctl = Self {
             device,
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
-        })
+            cursor_state,
+            cursor_thread: Some(cursor_thread),
+        };
+
+        // Wait briefly for cursor daemon to initialize
+        thread::sleep(Duration::from_millis(100));
+
+        // Warm-up movement: The first movement after device creation can be
+        // partially dropped by the kernel. Send a small dummy movement to ensure
+        // the device is fully initialized and subsequent movements work correctly.
+        let _ = ctl.move_mouse(1, 0);
+        thread::sleep(Duration::from_millis(50));
+        let _ = ctl.move_mouse(-1, 0);
+        thread::sleep(Duration::from_millis(50));
+
+        Ok(ctl)
+    }
+
+    /// Get current cursor position (instant, <1μs)
+    ///
+    /// Returns (x, y) screen coordinates. Returns (0, 0) if cursor tracking
+    /// is not available (e.g., not running on KDE/KWin).
+    pub fn cursor_pos(&self) -> (i32, i32) {
+        self.cursor_state.get()
+    }
+
+    /// Check if cursor tracking data is stale
+    ///
+    /// Returns true if no cursor position updates have been received
+    /// within the specified time. This can indicate that the KWin
+    /// cursor tracking script has stopped working.
+    pub fn cursor_is_stale(&self, max_age_ms: u64) -> bool {
+        self.cursor_state.is_stale(max_age_ms)
+    }
+
+    /// Move mouse to absolute screen position using servo control
+    ///
+    /// Uses a feedback loop to compensate for pointer acceleration and other
+    /// system effects. Queries cursor position after each movement and adjusts
+    /// until the target is reached within the specified tolerance.
+    ///
+    /// # Arguments
+    /// * `target_x` - Target X coordinate on screen
+    /// * `target_y` - Target Y coordinate on screen
+    /// * `tolerance` - Acceptable distance from target (e.g., 2 pixels)
+    ///
+    /// # Returns
+    /// * `Ok(())` if target reached within tolerance
+    /// * `Err` if target could not be reached after max attempts
+    pub fn move_to_position(&mut self, target_x: i32, target_y: i32, tolerance: i32) -> Result<()> {
+        const MAX_ATTEMPTS: usize = 20;
+        const SERVO_INTERVAL_MS: u64 = 5;
+
+        for _attempt in 0..MAX_ATTEMPTS {
+            let (current_x, current_y) = self.cursor_pos();
+            let dx = target_x - current_x;
+            let dy = target_y - current_y;
+
+            // Check if we're close enough
+            if dx.abs() <= tolerance && dy.abs() <= tolerance {
+                return Ok(());
+            }
+
+            // Move toward target
+            // Use full distance for small corrections, partial for large moves
+            let (move_x, move_y) = if dx.abs() > 100 || dy.abs() > 100 {
+                // Large distance: move half to avoid overshoot
+                (dx / 2, dy / 2)
+            } else if dx.abs() > 20 || dy.abs() > 20 {
+                // Medium distance: move 75%
+                (dx * 3 / 4, dy * 3 / 4)
+            } else {
+                // Small distance: move full amount
+                (dx, dy)
+            };
+
+            self.move_mouse(move_x, move_y)?;
+
+            // Wait for cursor to settle and get new position
+            thread::sleep(Duration::from_millis(SERVO_INTERVAL_MS));
+        }
+
+        Err(Error::DeviceError(format!(
+            "Failed to reach target ({}, {}) after {} attempts",
+            target_x, target_y, MAX_ATTEMPTS
+        )))
     }
 
     /// Type a string of text
@@ -152,6 +352,7 @@ impl InputCtl {
         let events = [
             InputEvent::new_now(evdev::EventType::RELATIVE, RelativeAxisType::REL_X.0, dx),
             InputEvent::new_now(evdev::EventType::RELATIVE, RelativeAxisType::REL_Y.0, dy),
+            InputEvent::new_now(evdev::EventType::SYNCHRONIZATION, 0, 0), // SYN_REPORT
         ];
         self.device.emit(&events)?;
         Ok(())
@@ -159,7 +360,8 @@ impl InputCtl {
 
     /// Move mouse smoothly over a duration with interpolation
     ///
-    /// Movements include low-frequency smooth noise for natural variation.
+    /// Uses servo feedback to compensate for pointer acceleration and guarantee
+    /// hitting the target. Movements include low-frequency smooth noise for natural variation.
     ///
     /// # Arguments
     /// * `dx` - Horizontal pixels to move (positive = right)
@@ -185,13 +387,32 @@ impl InputCtl {
         curve: Curve,
         noise: f64,
     ) -> Result<()> {
-        let steps = interpolation::generate_steps(dx, dy, duration, curve, noise);
-        let delay_ms = ((duration * 1000.0) / steps.len() as f64) as u64;
+        // Get start position for servo feedback
+        let (start_x, start_y) = self.cursor_pos();
+        let target_x = start_x + dx;
+        let target_y = start_y + dy;
 
-        for (step_x, step_y) in steps {
-            self.move_mouse(step_x, step_y)?;
+        // Generate waypoints (cumulative offsets from start)
+        let waypoints = interpolation::generate_waypoints(dx, dy, duration, curve, noise);
+        let delay_ms = ((duration * 1000.0) / waypoints.len() as f64) as u64;
+
+        for (waypoint_x, waypoint_y) in waypoints {
+            // Calculate where cursor should be now (absolute position)
+            let target_now_x = start_x + waypoint_x;
+            let target_now_y = start_y + waypoint_y;
+
+            // Get actual position and calculate servo correction
+            let (actual_x, actual_y) = self.cursor_pos();
+            let move_x = target_now_x - actual_x;
+            let move_y = target_now_y - actual_y;
+
+            self.move_mouse(move_x, move_y)?;
             thread::sleep(Duration::from_millis(delay_ms));
         }
+
+        // Final servo correction to guarantee hitting exact target
+        self.move_to_position(target_x, target_y, 2)?;
+
         Ok(())
     }
 
@@ -199,30 +420,31 @@ impl InputCtl {
     ///
     /// Positive values scroll up/right, negative scroll down/left
     pub fn scroll(&mut self, amount: i32) -> Result<()> {
-        let event = InputEvent::new_now(
-            evdev::EventType::RELATIVE,
-            RelativeAxisType::REL_WHEEL.0,
-            amount,
-        );
-        self.device.emit(&[event])?;
+        let events = [
+            InputEvent::new_now(evdev::EventType::RELATIVE, RelativeAxisType::REL_WHEEL.0, amount),
+            InputEvent::new_now(evdev::EventType::SYNCHRONIZATION, 0, 0), // SYN_REPORT
+        ];
+        self.device.emit(&events)?;
         Ok(())
     }
 
     /// Scroll horizontally
     pub fn scroll_horizontal(&mut self, amount: i32) -> Result<()> {
-        let event = InputEvent::new_now(
-            evdev::EventType::RELATIVE,
-            RelativeAxisType::REL_HWHEEL.0,
-            amount,
-        );
-        self.device.emit(&[event])?;
+        let events = [
+            InputEvent::new_now(evdev::EventType::RELATIVE, RelativeAxisType::REL_HWHEEL.0, amount),
+            InputEvent::new_now(evdev::EventType::SYNCHRONIZATION, 0, 0), // SYN_REPORT
+        ];
+        self.device.emit(&events)?;
         Ok(())
     }
 
     /// Emit a raw key event
     fn emit_key(&mut self, key: Key, value: i32) -> Result<()> {
-        let event = InputEvent::new_now(evdev::EventType::KEY, key.code(), value);
-        self.device.emit(&[event])?;
+        let events = [
+            InputEvent::new_now(evdev::EventType::KEY, key.code(), value),
+            InputEvent::new_now(evdev::EventType::SYNCHRONIZATION, 0, 0), // SYN_REPORT
+        ];
+        self.device.emit(&events)?;
         Ok(())
     }
 
@@ -241,6 +463,15 @@ impl Drop for InputCtl {
     fn drop(&mut self) {
         // Best-effort cleanup - swallow errors since Drop can't return Result
         let _ = self.release_all();
+
+        // Signal cursor daemon to shut down
+        self.cursor_state.signal_shutdown();
+
+        // Wait for cursor thread to finish (with timeout)
+        if let Some(thread) = self.cursor_thread.take() {
+            // Give it a short time to clean up
+            let _ = thread.join();
+        }
     }
 }
 
@@ -345,7 +576,7 @@ mod python {
 
         /// Press a key by name (e.g., "enter", "space", "a")
         fn key_press(&mut self, key_name: &str) -> PyResult<()> {
-            let key = parse_key_name(key_name)?;
+            let key = py_parse_key_name(key_name)?;
             self.inner.key_click(key).map_err(|e| {
                 pyo3::exceptions::PyOSError::new_err(e.to_string())
             })
@@ -353,7 +584,7 @@ mod python {
 
         /// Hold a key down
         fn key_down(&mut self, key_name: &str) -> PyResult<()> {
-            let key = parse_key_name(key_name)?;
+            let key = py_parse_key_name(key_name)?;
             self.inner.key_down(key).map_err(|e| {
                 pyo3::exceptions::PyOSError::new_err(e.to_string())
             })
@@ -361,7 +592,7 @@ mod python {
 
         /// Release a key
         fn key_up(&mut self, key_name: &str) -> PyResult<()> {
-            let key = parse_key_name(key_name)?;
+            let key = py_parse_key_name(key_name)?;
             self.inner.key_up(key).map_err(|e| {
                 pyo3::exceptions::PyOSError::new_err(e.to_string())
             })
@@ -385,7 +616,7 @@ mod python {
 
         /// Check if a key is currently held down
         fn is_key_held(&self, key_name: &str) -> PyResult<bool> {
-            let key = parse_key_name(key_name)?;
+            let key = py_parse_key_name(key_name)?;
             Ok(self.inner.is_key_held(key))
         }
 
@@ -428,69 +659,8 @@ mod python {
         }
     }
 
-    fn parse_key_name(name: &str) -> PyResult<Key> {
-        let key = match name.to_lowercase().as_str() {
-            "enter" | "return" => Key::KEY_ENTER,
-            "space" => Key::KEY_SPACE,
-            "tab" => Key::KEY_TAB,
-            "backspace" => Key::KEY_BACKSPACE,
-            "escape" | "esc" => Key::KEY_ESC,
-            "shift" | "lshift" => Key::KEY_LEFTSHIFT,
-            "rshift" => Key::KEY_RIGHTSHIFT,
-            "ctrl" | "control" | "lctrl" => Key::KEY_LEFTCTRL,
-            "rctrl" => Key::KEY_RIGHTCTRL,
-            "alt" | "lalt" => Key::KEY_LEFTALT,
-            "ralt" => Key::KEY_RIGHTALT,
-            "super" | "meta" | "win" => Key::KEY_LEFTMETA,
-            "up" => Key::KEY_UP,
-            "down" => Key::KEY_DOWN,
-            "left" => Key::KEY_LEFT,
-            "right" => Key::KEY_RIGHT,
-            "home" => Key::KEY_HOME,
-            "end" => Key::KEY_END,
-            "pageup" => Key::KEY_PAGEUP,
-            "pagedown" => Key::KEY_PAGEDOWN,
-            "insert" => Key::KEY_INSERT,
-            "delete" => Key::KEY_DELETE,
-            "f1" => Key::KEY_F1,
-            "f2" => Key::KEY_F2,
-            "f3" => Key::KEY_F3,
-            "f4" => Key::KEY_F4,
-            "f5" => Key::KEY_F5,
-            "f6" => Key::KEY_F6,
-            "f7" => Key::KEY_F7,
-            "f8" => Key::KEY_F8,
-            "f9" => Key::KEY_F9,
-            "f10" => Key::KEY_F10,
-            "f11" => Key::KEY_F11,
-            "f12" => Key::KEY_F12,
-            // Single characters
-            s if s.len() == 1 => {
-                let c = s.chars().next().unwrap();
-                match c.to_ascii_lowercase() {
-                    'a' => Key::KEY_A, 'b' => Key::KEY_B, 'c' => Key::KEY_C,
-                    'd' => Key::KEY_D, 'e' => Key::KEY_E, 'f' => Key::KEY_F,
-                    'g' => Key::KEY_G, 'h' => Key::KEY_H, 'i' => Key::KEY_I,
-                    'j' => Key::KEY_J, 'k' => Key::KEY_K, 'l' => Key::KEY_L,
-                    'm' => Key::KEY_M, 'n' => Key::KEY_N, 'o' => Key::KEY_O,
-                    'p' => Key::KEY_P, 'q' => Key::KEY_Q, 'r' => Key::KEY_R,
-                    's' => Key::KEY_S, 't' => Key::KEY_T, 'u' => Key::KEY_U,
-                    'v' => Key::KEY_V, 'w' => Key::KEY_W, 'x' => Key::KEY_X,
-                    'y' => Key::KEY_Y, 'z' => Key::KEY_Z,
-                    '0' => Key::KEY_0, '1' => Key::KEY_1, '2' => Key::KEY_2,
-                    '3' => Key::KEY_3, '4' => Key::KEY_4, '5' => Key::KEY_5,
-                    '6' => Key::KEY_6, '7' => Key::KEY_7, '8' => Key::KEY_8,
-                    '9' => Key::KEY_9,
-                    _ => return Err(pyo3::exceptions::PyValueError::new_err(
-                        format!("Unknown key: {}", name)
-                    )),
-                }
-            }
-            _ => return Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Unknown key: {}", name)
-            )),
-        };
-        Ok(key)
+    fn py_parse_key_name(name: &str) -> PyResult<Key> {
+        crate::parse_key_name(name).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn parse_mouse_button(name: &str) -> PyResult<MouseButton> {

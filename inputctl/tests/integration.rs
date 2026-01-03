@@ -184,3 +184,221 @@ fn test_get_held_buttons() {
     assert!(held.contains(&MouseButton::Left), "should contain Left");
     assert!(held.contains(&MouseButton::Right), "should contain Right");
 }
+
+#[test]
+#[ignore = "requires /dev/uinput access and KDE Plasma (run with sudo)"]
+fn test_mouse_movement_accuracy() {
+    use visionctl::find_cursor;
+
+    println!("\n=== Mouse Movement Accuracy Test ===\n");
+
+    // Get initial cursor position
+    let pos_before = find_cursor().expect("Failed to get initial cursor position");
+    println!("Initial cursor position: ({}, {})", pos_before.x, pos_before.y);
+
+    // Create inputctl device
+    let mut ctl = InputCtl::new().expect("Failed to create input device");
+
+    // Test cases: (dx, dy, description)
+    let test_cases = vec![
+        (100, 0, "right 100px"),
+        (0, 100, "down 100px"),
+        (-100, 0, "left 100px"),
+        (0, -100, "up 100px"),
+        (50, 50, "diagonal 50,50"),
+        (-50, -50, "diagonal -50,-50"),
+    ];
+
+    let mut failures = Vec::new();
+    let mut scale_factors = Vec::new();
+
+    for (dx, dy, desc) in test_cases {
+        println!("\nTest: Move {} ({}, {})", desc, dx, dy);
+
+        // Get position before move
+        let before = find_cursor().expect("Failed to get cursor position before move");
+        println!("  Before: ({}, {})", before.x, before.y);
+
+        // Move mouse
+        ctl.move_mouse(dx, dy).expect("Failed to move mouse");
+
+        // Wait for movement to complete
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Get position after move
+        let after = find_cursor().expect("Failed to get cursor position after move");
+        println!("  After:  ({}, {})", after.x, after.y);
+
+        // Calculate actual movement
+        let actual_dx = after.x - before.x;
+        let actual_dy = after.y - before.y;
+        println!("  Requested: ({}, {})", dx, dy);
+        println!("  Actual:    ({}, {})", actual_dx, actual_dy);
+
+        // Calculate error
+        let error_x = (actual_dx - dx).abs();
+        let error_y = (actual_dy - dy).abs();
+        println!("  Error:     ({}, {})", error_x, error_y);
+
+        // Calculate scaling factors
+        let scale_x = if dx != 0 { actual_dx as f64 / dx as f64 } else { 1.0 };
+        let scale_y = if dy != 0 { actual_dy as f64 / dy as f64 } else { 1.0 };
+        if dx != 0 || dy != 0 {
+            println!("  Scale:     ({:.4}, {:.4})", scale_x, scale_y);
+            if dx != 0 { scale_factors.push(scale_x); }
+            if dy != 0 { scale_factors.push(scale_y); }
+        }
+
+        // Check if error is within tolerance
+        let max_error = 2;
+        if error_x > max_error || error_y > max_error {
+            failures.push(format!(
+                "{}: expected ({}, {}), got ({}, {}), error ({}, {})",
+                desc, dx, dy, actual_dx, actual_dy, error_x, error_y
+            ));
+        }
+    }
+
+    // Calculate average scaling factor
+    if !scale_factors.is_empty() {
+        let avg_scale: f64 = scale_factors.iter().sum::<f64>() / scale_factors.len() as f64;
+        println!("\n=== Scaling Analysis ===");
+        println!("Average scaling factor: {:.4}", avg_scale);
+        println!("Compensation factor needed: {:.4}", 1.0 / avg_scale);
+        println!("All scale factors: {:?}", scale_factors);
+    }
+
+    if !failures.is_empty() {
+        println!("\n=== FAILURES ===");
+        for failure in &failures {
+            println!("  {}", failure);
+        }
+        panic!("\n{} test cases failed. See scaling analysis above.", failures.len());
+    }
+
+    println!("\n=== All movement tests passed! ===\n");
+}
+
+#[test]
+#[ignore = "requires sudo, KDE Plasma, and single-monitor (random positions may be unreachable on multi-monitor)"]
+fn test_smooth_mouse_movement_accuracy() {
+    use visionctl::find_cursor;
+
+    println!("\n=== Smooth Mouse Movement Accuracy Test ===\n");
+
+    // Get initial cursor position
+    let pos_before = find_cursor().expect("Failed to get initial cursor position");
+    println!("Initial cursor position: ({}, {})", pos_before.x, pos_before.y);
+
+    // Create inputctl device
+    let mut ctl = InputCtl::new().expect("Failed to create input device");
+
+    // Test cases: (dx, dy, duration, curve, noise, description)
+    let test_cases = vec![
+        (200, 0, 0.5, Curve::Linear, 0.0, "right 200px (no noise)"),
+        (0, 200, 0.5, Curve::EaseInOut, 0.0, "down 200px (no noise, ease)"),
+        (-200, 0, 0.5, Curve::Linear, 2.0, "left 200px (default noise)"),
+        (0, -200, 0.5, Curve::EaseInOut, 2.0, "up 200px (default noise, ease)"),
+    ];
+
+    let mut failures = Vec::new();
+    let mut errors_x = Vec::new();
+    let mut errors_y = Vec::new();
+
+    for (dx, dy, duration, curve, noise, desc) in test_cases {
+        println!("\nTest: Move {} (noise={})", desc, noise);
+
+        // Get position before move
+        let before = find_cursor().expect("Failed to get cursor position before move");
+        println!("  Before: ({}, {})", before.x, before.y);
+
+        // Move mouse smoothly
+        ctl.move_mouse_smooth(dx, dy, duration, curve, noise)
+            .expect("Failed to move mouse smoothly");
+
+        // Wait for movement to complete
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Get position after move
+        let after = find_cursor().expect("Failed to get cursor position after move");
+        println!("  After:  ({}, {})", after.x, after.y);
+
+        // Calculate actual movement
+        let actual_dx = after.x - before.x;
+        let actual_dy = after.y - before.y;
+        println!("  Requested: ({}, {})", dx, dy);
+        println!("  Actual:    ({}, {})", actual_dx, actual_dy);
+
+        // Calculate error
+        let error_x = actual_dx - dx;  // Keep sign to see if it's over/under
+        let error_y = actual_dy - dy;
+        println!("  Error:     ({}, {}) [+/-]", error_x, error_y);
+
+        if dx != 0 { errors_x.push(error_x); }
+        if dy != 0 { errors_y.push(error_y); }
+
+        // Check if error is within tolerance
+        let max_error = 3;
+        if error_x.abs() > max_error || error_y.abs() > max_error {
+            failures.push(format!(
+                "{}: expected ({}, {}), got ({}, {}), error ({}, {})",
+                desc, dx, dy, actual_dx, actual_dy, error_x, error_y
+            ));
+        }
+    }
+
+    // Test random movements to check consistency
+    println!("\n=== Random Movement Tests ===");
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+
+    for i in 0..20 {
+        let dx = rng.gen_range(-300..300);
+        let dy = rng.gen_range(-300..300);
+        let duration = 0.3;
+
+        let before = find_cursor().expect("Failed to get cursor position");
+        ctl.move_mouse_smooth(dx, dy, duration, Curve::Linear, 0.0)
+            .expect("Failed to move mouse smoothly");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let after = find_cursor().expect("Failed to get cursor position");
+
+        let actual_dx = after.x - before.x;
+        let actual_dy = after.y - before.y;
+        let error_x = actual_dx - dx;
+        let error_y = actual_dy - dy;
+
+        println!("Random #{}: req=({}, {}), actual=({}, {}), error=({}, {})",
+            i+1, dx, dy, actual_dx, actual_dy, error_x, error_y);
+
+        if dx != 0 { errors_x.push(error_x); }
+        if dy != 0 { errors_y.push(error_y); }
+    }
+
+    // Analyze error patterns
+    println!("\n=== Error Analysis ===");
+    if !errors_x.is_empty() {
+        let avg_x: f64 = errors_x.iter().map(|&e| e as f64).sum::<f64>() / errors_x.len() as f64;
+        let min_x = errors_x.iter().min().unwrap();
+        let max_x = errors_x.iter().max().unwrap();
+        println!("X-axis errors: min={}, max={}, avg={:.2}", min_x, max_x, avg_x);
+        println!("All X errors: {:?}", errors_x);
+    }
+    if !errors_y.is_empty() {
+        let avg_y: f64 = errors_y.iter().map(|&e| e as f64).sum::<f64>() / errors_y.len() as f64;
+        let min_y = errors_y.iter().min().unwrap();
+        let max_y = errors_y.iter().max().unwrap();
+        println!("Y-axis errors: min={}, max={}, avg={:.2}", min_y, max_y, avg_y);
+        println!("All Y errors: {:?}", errors_y);
+    }
+
+    if !failures.is_empty() {
+        println!("\n=== FAILURES ===");
+        for failure in &failures {
+            println!("  {}", failure);
+        }
+        panic!("\n{} test cases failed. See error analysis above.", failures.len());
+    }
+
+    println!("\n=== All smooth movement tests passed! ===\n");
+}

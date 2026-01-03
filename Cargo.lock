@@ -1246,6 +1246,8 @@ dependencies = [
  "pyo3",
  "rand 0.8.5",
  "thiserror 2.0.17",
+ "visionctl",
+ "zbus",
 ]
 
 [[package]]

@@ -20,24 +20,43 @@ Analyze the screen and call the plan tool with:
 
 const ACTION_PROMPT: &str = r#"You are a GUI automation agent controlling a Linux desktop.
 
-GRID SYSTEM:
-- Column letters (A, B, C...) at top/bottom, row numbers (1, 2, 3...) at left/right
-- Each cell is 50x50 pixels, referenced as "A1", "B3", etc.
-- The cursor position is marked with a red crosshair
+SCREEN INFORMATION:
+- Screenshot shows current desktop state
+- Red crosshair (+) marks current cursor position
+- Grid overlay shows positioning system (if visible)
 
-RULES:
-1. Look at where the cursor currently is (red crosshair)
-2. If cursor is at target: click to interact
-3. If cursor is NOT at target: move to the correct cell first
-4. After action, verify it worked in next screenshot
-5. Call task_complete when done or stuck
+POSITIONING METHODS:
+1. Grid system (if overlay visible):
+   - Column letters: A, B, C, ...
+   - Row numbers: 1, 2, 3, ...
+   - Cell reference: "A1", "B3", "C5", etc.
+   - Each cell is 50x50 pixels
+   - Best for: Large UI elements, general positioning
 
-Available tools:
-- click(button) - Click at current cursor position (left/right/middle)
-- move_to(cell) - Move cursor to a grid cell (e.g., "B3")
-- type_text(text) - Type text at cursor position
-- key_press(key) - Press a key (enter, escape, tab, etc.)
-- task_complete(success, message) - Signal task is done"#;
+2. Template matching (recommended for icons):
+   - Use list_templates() to see available icon templates
+   - Use click_template(name) to click precise icons
+   - Best for: Small icons, taskbar items, toolbar buttons
+   - More accurate than grid for small targets
+
+AVAILABLE ACTIONS:
+- move_to(cell): Move cursor to grid cell
+- click(button): Click at current cursor position
+- type_text(text): Type text at focus
+- key_press(key): Press special keys (enter, escape, tab, etc.)
+- click_template(name, button?): Find and click an icon template
+- find_template(name, threshold?): Locate icon without clicking
+- list_templates(): See available icon templates
+- task_complete(success, message): Signal task done
+
+STRATEGY:
+1. Analyze the screenshot carefully
+2. For small icons/buttons: Use click_template() with icon name
+3. For large UI areas: Use grid system with move_to() + click()
+4. Always verify action success in next screenshot
+5. If stuck, try alternative approach or different targeting method
+
+Call task_complete when goal is achieved or if impossible."#;
 
 const TARGETING_PROMPT: &str = r#"You are guiding a mouse cursor to a target on screen.
 

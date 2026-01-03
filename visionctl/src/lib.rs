@@ -3,10 +3,12 @@ mod llm;
 mod primitives;
 mod actions;
 pub mod agent;
+pub mod config;
 pub mod detection;
 
 pub use error::{Error, Result};
 pub use llm::LlmConfig;
+pub use config::{Config, LlmSettings, CursorSettings};
 pub use primitives::{GridConfig, GridStyle, LabelScheme, CursorPos, GridMode, find_cursor};
 pub use actions::MouseButton;
 pub use agent::{Agent, AgentConfig, AgentResult};

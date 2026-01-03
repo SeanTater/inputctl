@@ -93,6 +93,7 @@ fn smooth_noise(t: f64, control_points: &[(f64, f64)]) -> f64 {
 /// * `duration` - Time in seconds for the movement
 /// * `curve` - Interpolation curve type
 /// * `noise_amount` - Maximum deviation in pixels (e.g., 2.0 = ±2 pixels). Use 0.0 for no noise.
+/// * `fps` - Frames per second for waypoint generation (default 60)
 ///
 /// # Returns
 /// Vector of (offset_x, offset_y) cumulative positions from start
@@ -102,12 +103,12 @@ pub fn generate_waypoints(
     duration: f64,
     curve: Curve,
     noise_amount: f64,
+    fps: u32,
 ) -> Vec<(i32, i32)> {
     let mut rng = rand::thread_rng();
 
-    // No compensation needed - servo feedback handles acceleration!
-    // Target 30 Hz (33ms intervals) for smooth appearance
-    let steps = (duration * 30.0).ceil().max(10.0) as usize;
+    // Servo feedback handles acceleration - generate waypoints at target fps
+    let steps = (duration * fps as f64).ceil().max(10.0) as usize;
     let mut waypoints = Vec::with_capacity(steps);
 
     // Generate control points for smooth low-frequency noise
@@ -186,7 +187,7 @@ mod tests {
 
     #[test]
     fn generate_waypoints_reaches_target() {
-        let waypoints = generate_waypoints(100, 50, 0.5, Curve::Linear, 2.0);
+        let waypoints = generate_waypoints(100, 50, 0.5, Curve::Linear, 2.0, 60);
 
         // Final waypoint should be exact target
         let (final_x, final_y) = waypoints.last().unwrap();
@@ -197,25 +198,25 @@ mod tests {
     #[test]
     fn generate_waypoints_minimum_count() {
         // Even short durations should have minimum steps
-        let waypoints = generate_waypoints(10, 5, 0.01, Curve::Linear, 2.0);
+        let waypoints = generate_waypoints(10, 5, 0.01, Curve::Linear, 2.0, 60);
         assert!(waypoints.len() >= 10);
     }
 
     #[test]
     fn generate_waypoints_scales_with_duration() {
-        let waypoints_short = generate_waypoints(100, 50, 0.5, Curve::Linear, 2.0);
-        let waypoints_long = generate_waypoints(100, 50, 1.0, Curve::Linear, 2.0);
+        let waypoints_short = generate_waypoints(100, 50, 0.5, Curve::Linear, 2.0, 60);
+        let waypoints_long = generate_waypoints(100, 50, 1.0, Curve::Linear, 2.0, 60);
 
         // Longer duration should produce more waypoints
         assert!(waypoints_long.len() > waypoints_short.len());
 
-        // Should be approximately 30 Hz
-        assert!((waypoints_long.len() as f64 - 30.0).abs() < 5.0);
+        // Should be approximately 60 Hz
+        assert!((waypoints_long.len() as f64 - 60.0).abs() < 5.0);
     }
 
     #[test]
     fn generate_waypoints_negative_movement() {
-        let waypoints = generate_waypoints(-100, -50, 0.5, Curve::Linear, 2.0);
+        let waypoints = generate_waypoints(-100, -50, 0.5, Curve::Linear, 2.0, 60);
 
         // Final waypoint should be exact target
         let (final_x, final_y) = waypoints.last().unwrap();
@@ -225,7 +226,7 @@ mod tests {
 
     #[test]
     fn generate_waypoints_ease_in_out_reaches_target() {
-        let waypoints = generate_waypoints(200, 100, 1.0, Curve::EaseInOut, 2.0);
+        let waypoints = generate_waypoints(200, 100, 1.0, Curve::EaseInOut, 2.0, 60);
 
         // Final waypoint should be exact target
         let (final_x, final_y) = waypoints.last().unwrap();
@@ -235,7 +236,7 @@ mod tests {
 
     #[test]
     fn generate_waypoints_no_noise() {
-        let waypoints = generate_waypoints(100, 50, 1.0, Curve::Linear, 0.0);
+        let waypoints = generate_waypoints(100, 50, 1.0, Curve::Linear, 0.0, 60);
 
         // Final waypoint should be exact target
         let (final_x, final_y) = waypoints.last().unwrap();
@@ -245,7 +246,7 @@ mod tests {
 
     #[test]
     fn generate_waypoints_cumulative() {
-        let waypoints = generate_waypoints(100, 50, 0.5, Curve::Linear, 0.0);
+        let waypoints = generate_waypoints(100, 50, 0.5, Curve::Linear, 0.0, 60);
 
         // Waypoints should be monotonically increasing (cumulative)
         let mut prev_x = 0;

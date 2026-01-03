@@ -369,15 +369,16 @@ impl InputCtl {
     /// * `duration` - Time in seconds (e.g., 1.5)
     /// * `curve` - Interpolation curve type
     /// * `noise` - Maximum deviation in pixels (e.g., 2.0 = ±2 pixels). Use 0.0 for perfectly smooth.
+    /// * `fps` - Frames per second for movement updates (default 60)
     ///
     /// # Example
     /// ```no_run
     /// use inputctl::{InputCtl, Curve};
     /// let mut ctl = InputCtl::new().unwrap();
-    /// // Move with ±2 pixel natural variation
-    /// ctl.move_mouse_smooth(100, 50, 1.0, Curve::EaseInOut, 2.0).unwrap();
+    /// // Move with ±2 pixel natural variation at 60 fps
+    /// ctl.move_mouse_smooth(100, 50, 1.0, Curve::EaseInOut, 2.0, 60).unwrap();
     /// // Move perfectly smooth with no noise
-    /// ctl.move_mouse_smooth(100, 50, 1.0, Curve::Linear, 0.0).unwrap();
+    /// ctl.move_mouse_smooth(100, 50, 1.0, Curve::Linear, 0.0, 60).unwrap();
     /// ```
     pub fn move_mouse_smooth(
         &mut self,
@@ -386,6 +387,7 @@ impl InputCtl {
         duration: f64,
         curve: Curve,
         noise: f64,
+        fps: u32,
     ) -> Result<()> {
         // Get start position for servo feedback
         let (start_x, start_y) = self.cursor_pos();
@@ -393,7 +395,7 @@ impl InputCtl {
         let target_y = start_y + dy;
 
         // Generate waypoints (cumulative offsets from start)
-        let waypoints = interpolation::generate_waypoints(dx, dy, duration, curve, noise);
+        let waypoints = interpolation::generate_waypoints(dx, dy, duration, curve, noise, fps);
         let delay_ms = ((duration * 1000.0) / waypoints.len() as f64) as u64;
 
         for (waypoint_x, waypoint_y) in waypoints {
@@ -542,7 +544,8 @@ mod python {
         /// * `duration` - Time in seconds (e.g., 1.5)
         /// * `curve` - Interpolation curve: "linear" or "ease-in-out" (default: "linear")
         /// * `noise` - Maximum deviation in pixels (default: 2.0). Use 0.0 for perfectly smooth.
-        #[pyo3(signature = (dx, dy, duration, curve="linear", noise=2.0))]
+        /// * `fps` - Frames per second for movement updates (default: 60)
+        #[pyo3(signature = (dx, dy, duration, curve="linear", noise=2.0, fps=60))]
         fn move_mouse_smooth(
             &mut self,
             dx: i32,
@@ -550,6 +553,7 @@ mod python {
             duration: f64,
             curve: &str,
             noise: f64,
+            fps: u32,
         ) -> PyResult<()> {
             use super::Curve;
             let curve_enum = match curve.to_lowercase().as_str() {
@@ -563,7 +567,7 @@ mod python {
             };
 
             self.inner
-                .move_mouse_smooth(dx, dy, duration, curve_enum, noise)
+                .move_mouse_smooth(dx, dy, duration, curve_enum, noise, fps)
                 .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 

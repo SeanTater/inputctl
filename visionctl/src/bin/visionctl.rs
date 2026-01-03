@@ -1,9 +1,10 @@
 use clap::{Parser, Subcommand};
+use dialoguer::{Input, Select};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
-use visionctl::{Agent, LlmConfig, VisionCtl};
+use visionctl::{Agent, Config, LlmConfig, VisionCtl};
 
 #[derive(Parser)]
 #[command(name = "visionctl")]
@@ -57,6 +58,8 @@ enum Commands {
     },
     /// Install KDE desktop file for screenshot permissions
     InstallDesktopFile,
+    /// Run interactive configuration wizard
+    Setup,
 }
 
 fn main() -> visionctl::Result<()> {
@@ -76,6 +79,7 @@ fn main() -> visionctl::Result<()> {
             threshold,
         }) => run_click_template(&template, threshold),
         Some(Commands::InstallDesktopFile) => install_desktop_file(),
+        Some(Commands::Setup) => run_setup(),
         None => {
             // Default: query LLM with question
             let question = if cli.question.is_empty() {
@@ -100,23 +104,32 @@ fn main() -> visionctl::Result<()> {
 }
 
 fn get_llm_config() -> visionctl::Result<LlmConfig> {
-    let backend = std::env::var("VISIONCTL_BACKEND").unwrap_or_else(|_| "ollama".to_string());
-    let url =
-        std::env::var("VISIONCTL_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let model = std::env::var("VISIONCTL_MODEL").unwrap_or_else(|_| "llava".to_string());
+    // Load config file (or defaults)
+    let file_config = Config::load();
+
+    // Priority: env vars > config file > defaults
+    let backend = std::env::var("VISIONCTL_BACKEND")
+        .unwrap_or_else(|_| file_config.llm.backend.clone());
+    let url = std::env::var("VISIONCTL_URL")
+        .unwrap_or_else(|_| file_config.llm.base_url.clone());
+    let model = std::env::var("VISIONCTL_MODEL")
+        .unwrap_or_else(|_| file_config.llm.model.clone());
+    let api_key = std::env::var("VISIONCTL_API_KEY")
+        .ok()
+        .or_else(|| file_config.llm.api_key.clone());
 
     let config = match backend.to_lowercase().as_str() {
         "ollama" => LlmConfig::Ollama { url, model },
         "vllm" => LlmConfig::Vllm {
             url,
             model,
-            api_key: std::env::var("VISIONCTL_API_KEY").ok(),
+            api_key,
         },
         "openai" => LlmConfig::OpenAI {
             url,
             model,
-            api_key: std::env::var("VISIONCTL_API_KEY").map_err(|_| {
-                visionctl::Error::LlmApiError("VISIONCTL_API_KEY required for OpenAI".to_string())
+            api_key: api_key.ok_or_else(|| {
+                visionctl::Error::LlmApiError("API key required for OpenAI (set VISIONCTL_API_KEY or run 'visionctl setup')".to_string())
             })?,
         },
         _ => {
@@ -388,6 +401,109 @@ X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
     println!("You can verify this by running:");
     println!("  cargo run --example screenshot_test --release");
     println!("\nNote: If you move the visionctl binary, you'll need to run this command again.");
+
+    Ok(())
+}
+
+fn run_setup() -> visionctl::Result<()> {
+    println!("=== VisionCtl Configuration Wizard ===\n");
+
+    // Load existing config or defaults
+    let mut config = Config::load();
+
+    // LLM Backend selection
+    let backends = ["Ollama (Recommended)", "vLLM", "OpenAI"];
+    let default_idx = match config.llm.backend.as_str() {
+        "vllm" => 1,
+        "openai" => 2,
+        _ => 0,
+    };
+
+    let backend_idx = Select::new()
+        .with_prompt("Select LLM backend")
+        .items(&backends)
+        .default(default_idx)
+        .interact()
+        .unwrap();
+
+    config.llm.backend = match backend_idx {
+        1 => "vllm".to_string(),
+        2 => "openai".to_string(),
+        _ => "ollama".to_string(),
+    };
+
+    // Base URL with backend-specific defaults
+    let default_url = match config.llm.backend.as_str() {
+        "vllm" => "http://localhost:8000".to_string(),
+        "openai" => "https://api.openai.com/v1".to_string(),
+        _ => "http://localhost:11434".to_string(),
+    };
+
+    let url: String = Input::new()
+        .with_prompt("Base URL")
+        .default(if config.llm.base_url != default_url && !config.llm.base_url.is_empty() {
+            config.llm.base_url.clone()
+        } else {
+            default_url
+        })
+        .interact_text()
+        .unwrap();
+    config.llm.base_url = url;
+
+    // Model
+    let default_model = match config.llm.backend.as_str() {
+        "vllm" => "Qwen/Qwen2.5-VL-7B-Instruct".to_string(),
+        "openai" => "gpt-4o".to_string(),
+        _ => "qwen3-vl:30b".to_string(),
+    };
+
+    let model: String = Input::new()
+        .with_prompt("Model name")
+        .default(if config.llm.model != default_model && !config.llm.model.is_empty() {
+            config.llm.model.clone()
+        } else {
+            default_model
+        })
+        .interact_text()
+        .unwrap();
+    config.llm.model = model;
+
+    // API Key (only for vllm/openai)
+    if config.llm.backend == "vllm" || config.llm.backend == "openai" {
+        let api_key: String = Input::new()
+            .with_prompt("API Key (leave empty to skip)")
+            .default(config.llm.api_key.clone().unwrap_or_default())
+            .allow_empty(true)
+            .interact_text()
+            .unwrap();
+        config.llm.api_key = if api_key.is_empty() { None } else { Some(api_key) };
+    }
+
+    // Cursor FPS
+    let fps: u32 = Input::new()
+        .with_prompt("Smooth mouse movement FPS")
+        .default(config.cursor.smooth_fps)
+        .interact_text()
+        .unwrap();
+    config.cursor.smooth_fps = fps;
+
+    // Save config
+    println!("\n--- Configuration Summary ---");
+    println!("Backend:    {}", config.llm.backend);
+    println!("Base URL:   {}", config.llm.base_url);
+    println!("Model:      {}", config.llm.model);
+    if let Some(ref key) = config.llm.api_key {
+        println!("API Key:    {}...", &key[..key.len().min(8)]);
+    }
+    println!("Smooth FPS: {}", config.cursor.smooth_fps);
+    println!();
+
+    config.save().map_err(|e| {
+        visionctl::Error::ScreenshotFailed(format!("Failed to save config: {}", e))
+    })?;
+
+    println!("Configuration saved to: {}", Config::path().display());
+    println!("\nYou can edit this file manually or run 'visionctl setup' again.");
 
     Ok(())
 }

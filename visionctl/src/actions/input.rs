@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::primitives::{GridConfig, grid_to_pixel, find_cursor};
 use std::sync::{Mutex, OnceLock};
@@ -5,6 +6,14 @@ use std::time::Duration;
 
 // Lazy-initialized global InputCtl instance
 static INPUT_CTL: OnceLock<Mutex<inputctl::InputCtl>> = OnceLock::new();
+
+// Lazy-initialized config (cached)
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
+/// Get the cached config
+fn get_config() -> &'static Config {
+    CONFIG.get_or_init(Config::load)
+}
 
 /// Get or initialize the global InputCtl instance
 fn get_input_ctl() -> Result<&'static Mutex<inputctl::InputCtl>> {
@@ -35,6 +44,7 @@ pub fn click(button: MouseButton) -> Result<()> {
 pub fn click_at_pixel(x: i32, y: i32, button: MouseButton) -> Result<()> {
     let ctl = get_input_ctl()?;
     let mut ctl = ctl.lock().unwrap();
+    let fps = get_config().cursor.smooth_fps;
 
     // Find current cursor position
     let cursor = find_cursor()?;
@@ -44,7 +54,7 @@ pub fn click_at_pixel(x: i32, y: i32, button: MouseButton) -> Result<()> {
     let dy = y - cursor.y;
 
     // Move smoothly to target with no noise for precision
-    ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0)
+    ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0, fps)
         .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
 
     // Small delay before clicking
@@ -61,6 +71,7 @@ pub fn click_at_pixel(x: i32, y: i32, button: MouseButton) -> Result<()> {
 pub fn move_to_pixel(x: i32, y: i32, smooth: bool) -> Result<()> {
     let ctl = get_input_ctl()?;
     let mut ctl = ctl.lock().unwrap();
+    let fps = get_config().cursor.smooth_fps;
 
     // Find current cursor position
     let cursor = find_cursor()?;
@@ -71,7 +82,7 @@ pub fn move_to_pixel(x: i32, y: i32, smooth: bool) -> Result<()> {
 
     if smooth {
         // No noise for precision targeting
-        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0)
+        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0, fps)
             .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
     } else {
         ctl.move_mouse(dx, dy)
@@ -85,10 +96,11 @@ pub fn move_to_pixel(x: i32, y: i32, smooth: bool) -> Result<()> {
 pub fn move_relative(dx: i32, dy: i32, smooth: bool) -> Result<()> {
     let ctl = get_input_ctl()?;
     let mut ctl = ctl.lock().unwrap();
+    let fps = get_config().cursor.smooth_fps;
 
     if smooth {
         // No noise for precision targeting
-        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0)
+        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0, fps)
             .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
     } else {
         ctl.move_mouse(dx, dy)

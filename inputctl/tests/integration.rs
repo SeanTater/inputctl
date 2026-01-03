@@ -49,7 +49,7 @@ fn scroll() {
 #[ignore = "requires /dev/uinput access (run with sudo)"]
 fn mouse_move_smooth_linear() {
     let mut yd = InputCtl::new().expect("failed to create device");
-    let result = yd.move_mouse_smooth(100, 50, 0.5, Curve::Linear, 2.0);
+    let result = yd.move_mouse_smooth(100, 50, 0.5, Curve::Linear, 2.0, 60);
     assert!(result.is_ok(), "should move mouse smoothly: {:?}", result.err());
 }
 
@@ -57,7 +57,7 @@ fn mouse_move_smooth_linear() {
 #[ignore = "requires /dev/uinput access (run with sudo)"]
 fn mouse_move_smooth_ease_in_out() {
     let mut yd = InputCtl::new().expect("failed to create device");
-    let result = yd.move_mouse_smooth(100, 50, 1.0, Curve::EaseInOut, 2.0);
+    let result = yd.move_mouse_smooth(100, 50, 1.0, Curve::EaseInOut, 2.0, 60);
     assert!(result.is_ok(), "should move mouse smoothly with ease-in-out: {:?}", result.err());
 }
 
@@ -65,7 +65,7 @@ fn mouse_move_smooth_ease_in_out() {
 #[ignore = "requires /dev/uinput access (run with sudo)"]
 fn mouse_move_smooth_negative() {
     let mut yd = InputCtl::new().expect("failed to create device");
-    let result = yd.move_mouse_smooth(-50, -30, 0.3, Curve::Linear, 2.0);
+    let result = yd.move_mouse_smooth(-50, -30, 0.3, Curve::Linear, 2.0, 60);
     assert!(result.is_ok(), "should move mouse smoothly in negative direction: {:?}", result.err());
 }
 
@@ -73,7 +73,7 @@ fn mouse_move_smooth_negative() {
 #[ignore = "requires /dev/uinput access (run with sudo)"]
 fn mouse_move_smooth_no_noise() {
     let mut yd = InputCtl::new().expect("failed to create device");
-    let result = yd.move_mouse_smooth(100, 50, 1.0, Curve::Linear, 0.0);
+    let result = yd.move_mouse_smooth(100, 50, 1.0, Curve::Linear, 0.0, 60);
     assert!(result.is_ok(), "should move mouse smoothly with no noise: {:?}", result.err());
 }
 
@@ -313,7 +313,7 @@ fn test_smooth_mouse_movement_accuracy() {
         println!("  Before: ({}, {})", before.x, before.y);
 
         // Move mouse smoothly
-        ctl.move_mouse_smooth(dx, dy, duration, curve, noise)
+        ctl.move_mouse_smooth(dx, dy, duration, curve, noise, 60)
             .expect("Failed to move mouse smoothly");
 
         // Wait for movement to complete
@@ -358,7 +358,7 @@ fn test_smooth_mouse_movement_accuracy() {
         let duration = 0.3;
 
         let before = find_cursor().expect("Failed to get cursor position");
-        ctl.move_mouse_smooth(dx, dy, duration, Curve::Linear, 0.0)
+        ctl.move_mouse_smooth(dx, dy, duration, Curve::Linear, 0.0, 60)
             .expect("Failed to move mouse smoothly");
         std::thread::sleep(std::time::Duration::from_millis(100));
         let after = find_cursor().expect("Failed to get cursor position");

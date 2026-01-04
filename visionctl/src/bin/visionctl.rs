@@ -26,11 +26,6 @@ enum Commands {
         /// Goal for the agent to accomplish
         goal: String,
     },
-    /// Guide cursor to target element and click
-    Target {
-        /// Description of the target element
-        description: String,
-    },
     /// Capture screenshot to file
     Screenshot {
         /// Output path for screenshot
@@ -67,7 +62,6 @@ fn main() -> visionctl::Result<()> {
 
     match cli.command {
         Some(Commands::Agent { goal }) => run_agent(&goal),
-        Some(Commands::Target { description }) => run_target(&description),
         Some(Commands::Screenshot { output }) => run_screenshot(&output),
         Some(Commands::FindTemplate {
             template,
@@ -177,32 +171,6 @@ fn run_agent(goal: &str) -> visionctl::Result<()> {
     let result = agent.run(goal)?;
 
     eprintln!("\n=== Agent Complete ===");
-    println!(
-        "{}",
-        serde_json::json!({
-            "success": result.success,
-            "message": result.message,
-            "iterations": result.iterations,
-            "actions": result.actions_taken
-        })
-    );
-
-    Ok(())
-}
-
-fn run_target(target: &str) -> visionctl::Result<()> {
-    eprintln!("=== VisionCtl Target Mode ===");
-    eprintln!("Target: {}\n", target);
-
-    let config = get_llm_config()?;
-
-    let agent = Agent::new(config)?
-        .with_max_iterations(10)
-        .with_verbose(true);
-
-    let result = agent.target(target)?;
-
-    eprintln!("\n=== Target Complete ===");
     println!(
         "{}",
         serde_json::json!({

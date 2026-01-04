@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::llm::{LlmClient, LlmConfig, Message, get_plan_tool, get_action_tools, get_targeting_tools, execute_tool};
+use crate::llm::{LlmClient, LlmConfig, Message, get_plan_tool, get_action_tools, execute_tool};
 use crate::VisionCtl;
 use crate::primitives::{ScreenshotOptions, capture_screenshot};
 use serde_json::json;
@@ -57,24 +57,6 @@ STRATEGY:
 5. If stuck, try alternative approach or different targeting method
 
 Call task_complete when goal is achieved or if impossible."#;
-
-const TARGETING_PROMPT: &str = r#"You are guiding a mouse cursor to a target on screen.
-
-The RED CIRCLE with CROSSHAIR shows the current cursor position.
-
-Your task: Move the cursor to the TARGET described by the user.
-
-RULES:
-1. Look at where the red cursor marker is
-2. Look at where the target is
-3. If cursor is ON the target: call click() to click it
-4. If cursor is NOT on target: call move_direction() with direction and PERCENTAGE of screen to move
-
-PERCENTAGE GUIDE:
-- 5% = small adjustment (fine-tuning when close)
-- 10-20% = medium move (target is nearby)
-- 30-50% = large move (target is far across screen)
-- The screen is very wide, so don't be afraid to use 30-50% for horizontal moves"#;
 
 /// Agent configuration
 pub struct AgentConfig {
@@ -138,16 +120,6 @@ impl Agent {
     fn screenshot_with_cursor(&self) -> Result<Vec<u8>> {
         let options = ScreenshotOptions {
             grid: Some(self.ctl.grid_config.clone()),
-            mark_cursor: true,
-        };
-        let data = capture_screenshot(options)?;
-        Ok(data.png_bytes)
-    }
-
-    /// Take screenshot with cursor marked (no grid - cleaner for targeting)
-    fn screenshot_cursor_only(&self) -> Result<Vec<u8>> {
-        let options = ScreenshotOptions {
-            grid: None,
             mark_cursor: true,
         };
         let data = capture_screenshot(options)?;
@@ -352,148 +324,6 @@ impl Agent {
         })
     }
 
-    /// Iteratively guide cursor to a target and click it
-    ///
-    /// Uses cursor-relative navigation instead of grid coordinates.
-    /// Takes screenshots without grid overlay for cleaner vision.
-    pub fn target(&self, target_description: &str) -> Result<AgentResult> {
-        let mut actions_taken = Vec::new();
-        let targeting_tools = get_targeting_tools();
-
-        let mut messages: Vec<Message> = vec![
-            Message {
-                role: "system".to_string(),
-                content: Some(TARGETING_PROMPT.to_string()),
-                images: None,
-                tool_calls: None,
-            },
-            Message {
-                role: "user".to_string(),
-                content: Some(format!("TARGET: {}", target_description)),
-                images: None,
-                tool_calls: None,
-            },
-        ];
-
-        for iteration in 0..self.config.max_iterations {
-            if self.config.verbose {
-                eprintln!("\n[Target iteration {}] Taking screenshot...", iteration + 1);
-            }
-
-            let screenshot = self.screenshot_cursor_only()?;
-
-            if self.config.save_screenshots {
-                let path = format!("/tmp/visionctl_target_{}.png", iteration);
-                let _ = fs::write(&path, &screenshot);
-                if self.config.verbose {
-                    eprintln!("[Target iteration {}] Screenshot saved to {}", iteration + 1, path);
-                }
-            }
-
-            if self.config.verbose {
-                eprintln!("[Target iteration {}] Querying LLM...", iteration + 1);
-            }
-
-            let response = self.llm_client.chat_with_tools(&messages, &targeting_tools, Some(&screenshot))?;
-
-            if let Some(tool_calls) = &response.tool_calls {
-                for call in tool_calls {
-                    let tool_name = &call.function.name;
-                    let tool_args = &call.function.arguments;
-
-                    if self.config.verbose {
-                        eprintln!("[Target iteration {}] Tool: {}({})", iteration + 1, tool_name, tool_args);
-                    }
-
-                    // Check for click (target reached and clicking)
-                    if tool_name == "click" {
-                        execute_tool(&self.ctl, tool_name, tool_args.clone())?;
-                        actions_taken.push(format!("click"));
-
-                        return Ok(AgentResult {
-                            success: true,
-                            message: format!("Clicked on target: {}", target_description),
-                            iterations: iteration + 1,
-                            actions_taken,
-                        });
-                    }
-
-                    // Check for target_reached (done without clicking)
-                    if tool_name == "target_reached" {
-                        let success = tool_args.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let message = tool_args.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-                        return Ok(AgentResult {
-                            success,
-                            message,
-                            iterations: iteration + 1,
-                            actions_taken,
-                        });
-                    }
-
-                    // Execute move_direction
-                    if tool_name == "move_direction" {
-                        let result = match execute_tool(&self.ctl, tool_name, tool_args.clone()) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                if self.config.verbose {
-                                    eprintln!("[Target iteration {}] Tool error: {}", iteration + 1, e);
-                                }
-                                json!({"success": false, "error": e.to_string()})
-                            }
-                        };
-
-                        let direction = tool_args.get("direction").and_then(|v| v.as_str()).unwrap_or("?");
-                        let percent = tool_args.get("percent").and_then(|v| v.as_i64()).unwrap_or(0);
-                        actions_taken.push(format!("move_direction({}, {}%)", direction, percent));
-
-                        // Add to message history for context
-                        messages.push(Message {
-                            role: "assistant".to_string(),
-                            content: response.content.clone(),
-                            images: None,
-                            tool_calls: Some(vec![call.clone()]),
-                        });
-
-                        messages.push(Message {
-                            role: "tool".to_string(),
-                            content: Some(result.to_string()),
-                            images: None,
-                            tool_calls: None,
-                        });
-                    }
-
-                    std::thread::sleep(Duration::from_millis(300));
-                }
-            } else if let Some(content) = &response.content {
-                if self.config.verbose {
-                    eprintln!("[Target iteration {}] LLM says: {}", iteration + 1, content);
-                }
-
-                // Add a nudge to use tools
-                messages.push(Message {
-                    role: "assistant".to_string(),
-                    content: Some(content.clone()),
-                    images: None,
-                    tool_calls: None,
-                });
-
-                messages.push(Message {
-                    role: "user".to_string(),
-                    content: Some("Use the tools: move_direction to move cursor, or click if cursor is on target.".to_string()),
-                    images: None,
-                    tool_calls: None,
-                });
-            }
-        }
-
-        Ok(AgentResult {
-            success: false,
-            message: format!("Max iterations ({}) reached without reaching target", self.config.max_iterations),
-            iterations: self.config.max_iterations,
-            actions_taken,
-        })
-    }
 }
 
 /// Parse tool calls from text output (fallback for models that output tool syntax as text)

@@ -197,63 +197,6 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     tools
 }
 
-/// Get tools for iterative cursor targeting (simplified set)
-pub fn get_targeting_tools() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            name: "move_direction".to_string(),
-            description: "Move the cursor toward the target. Call this when cursor is NOT on the target.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "direction": {
-                        "type": "string",
-                        "enum": ["up", "down", "left", "right"],
-                        "description": "Direction to move the cursor"
-                    },
-                    "percent": {
-                        "type": "integer",
-                        "description": "Percentage of screen to move (1-100). E.g., 10 = 10% of screen width/height"
-                    }
-                },
-                "required": ["direction", "percent"]
-            })
-        },
-        ToolDefinition {
-            name: "click".to_string(),
-            description: "Click at the current cursor position. ONLY call this when the cursor is on the target.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "button": {
-                        "type": "string",
-                        "enum": ["left", "right", "middle"],
-                        "default": "left"
-                    }
-                }
-            })
-        },
-        ToolDefinition {
-            name: "target_reached".to_string(),
-            description: "Signal that cursor is on target but no click is needed, or give up.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "success": {
-                        "type": "boolean",
-                        "description": "true if cursor reached target, false if giving up"
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Status message"
-                    }
-                },
-                "required": ["success"]
-            })
-        },
-    ]
-}
-
 /// Execute a tool by name with parameters
 pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value> {
     match name {

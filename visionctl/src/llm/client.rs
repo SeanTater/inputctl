@@ -23,11 +23,16 @@ pub struct Message {
     pub images: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// For tool response messages, links to the original tool call
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// Tool call from the model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub function: FunctionCall,
 }
 
@@ -133,7 +138,24 @@ impl LlmClient {
                 msg["images"] = json!(images);
             }
             if let Some(tool_calls) = &m.tool_calls {
-                msg["tool_calls"] = json!(tool_calls);
+                // Include ID in tool calls for Ollama
+                let tc_with_ids: Vec<Value> = tool_calls.iter().map(|tc| {
+                    let mut obj = json!({
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    });
+                    if let Some(id) = &tc.id {
+                        obj["id"] = json!(id);
+                    }
+                    obj
+                }).collect();
+                msg["tool_calls"] = json!(tc_with_ids);
+            }
+            // For tool response messages, include the tool_call_id
+            if let Some(tool_call_id) = &m.tool_call_id {
+                msg["tool_call_id"] = json!(tool_call_id);
             }
             msg
         }).collect();
@@ -182,12 +204,18 @@ impl LlmClient {
         let tool_calls = message.get("tool_calls")
             .and_then(|v| v.as_array())
             .map(|arr| {
-                arr.iter().filter_map(|tc| {
+                arr.iter().enumerate().filter_map(|(i, tc)| {
                     let function = tc.get("function")?;
                     let name = function.get("name")?.as_str()?.to_string();
                     // Arguments can be a string or object - Ollama returns it as object
                     let arguments = function.get("arguments").cloned().unwrap_or(json!({}));
+                    // Get ID from response or generate one
+                    let id = tc.get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| Some(format!("call_{}", i)));
                     Some(ToolCall {
+                        id,
                         function: FunctionCall { name, arguments }
                     })
                 }).collect()
@@ -263,7 +291,7 @@ impl LlmClient {
                     // Convert tool calls to OpenAI format with IDs
                     let tc_array: Vec<Value> = tool_calls.iter().enumerate().map(|(idx, tc)| {
                         json!({
-                            "id": format!("call_{}", idx),
+                            "id": tc.id.clone().unwrap_or_else(|| format!("call_{}", idx)),
                             "type": "function",
                             "function": {
                                 "name": tc.function.name,
@@ -272,6 +300,10 @@ impl LlmClient {
                         })
                     }).collect();
                     msg["tool_calls"] = json!(tc_array);
+                }
+                // For tool response messages, include tool_call_id
+                if let Some(tool_call_id) = &m.tool_call_id {
+                    msg["tool_call_id"] = json!(tool_call_id);
                 }
                 openai_messages.push(msg);
             }
@@ -314,7 +346,7 @@ impl LlmClient {
         let tool_calls = message.get("tool_calls")
             .and_then(|v| v.as_array())
             .map(|arr| {
-                arr.iter().filter_map(|tc| {
+                arr.iter().enumerate().filter_map(|(i, tc)| {
                     let function = tc.get("function")?;
                     let name = function.get("name")?.as_str()?.to_string();
                     // OpenAI returns arguments as a JSON string, parse it
@@ -322,7 +354,13 @@ impl LlmClient {
                         .and_then(|v| v.as_str())
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or(json!({}));
+                    // Get ID from response or generate one
+                    let id = tc.get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| Some(format!("call_{}", i)));
                     Some(ToolCall {
+                        id,
                         function: FunctionCall { name, arguments }
                     })
                 }).collect()

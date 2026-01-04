@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use tracing::warn;
 
 /// Main configuration for visionctl
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -90,10 +91,10 @@ impl Config {
                 Ok(contents) => {
                     match toml::from_str(&contents) {
                         Ok(config) => return config,
-                        Err(e) => eprintln!("Warning: Failed to parse config: {}", e),
+                        Err(e) => warn!(error = %e, "Failed to parse config"),
                     }
                 }
-                Err(e) => eprintln!("Warning: Failed to read config: {}", e),
+                Err(e) => warn!(error = %e, "Failed to read config"),
             }
         }
         Self::default()

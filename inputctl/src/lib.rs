@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use tracing::{debug, trace, warn};
 
 pub use error::{Error, Result};
 pub use interpolation::Curve;
@@ -139,7 +140,7 @@ impl InputCtl {
         let cursor_thread = thread::spawn(move || {
             if let Err(e) = cursor_daemon::run_daemon(state_clone, pid) {
                 // Log error but don't fail - cursor tracking is optional
-                eprintln!("[inputctl] Cursor daemon failed (KWin not available?): {}", e);
+                warn!(error = %e, "Cursor daemon failed (KWin not available?)");
             }
         });
 
@@ -200,13 +201,29 @@ impl InputCtl {
         const MAX_ATTEMPTS: usize = 20;
         const SERVO_INTERVAL_MS: u64 = 5;
 
-        for _attempt in 0..MAX_ATTEMPTS {
+        let (start_x, start_y) = self.cursor_pos();
+        debug!(
+            target_x = target_x,
+            target_y = target_y,
+            start_x = start_x,
+            start_y = start_y,
+            tolerance = tolerance,
+            "Starting move_to_position"
+        );
+
+        for attempt in 0..MAX_ATTEMPTS {
             let (current_x, current_y) = self.cursor_pos();
             let dx = target_x - current_x;
             let dy = target_y - current_y;
 
             // Check if we're close enough
             if dx.abs() <= tolerance && dy.abs() <= tolerance {
+                debug!(
+                    final_x = current_x,
+                    final_y = current_y,
+                    attempts = attempt + 1,
+                    "Target reached"
+                );
                 return Ok(());
             }
 
@@ -223,12 +240,33 @@ impl InputCtl {
                 (dx, dy)
             };
 
+            trace!(
+                attempt = attempt + 1,
+                current_x = current_x,
+                current_y = current_y,
+                dx = dx,
+                dy = dy,
+                move_x = move_x,
+                move_y = move_y,
+                "Servo correction"
+            );
+
             self.move_mouse(move_x, move_y)?;
 
             // Wait for cursor to settle and get new position
             thread::sleep(Duration::from_millis(SERVO_INTERVAL_MS));
         }
 
+        let (final_x, final_y) = self.cursor_pos();
+        warn!(
+            target_x = target_x,
+            target_y = target_y,
+            final_x = final_x,
+            final_y = final_y,
+            start_x = start_x,
+            start_y = start_y,
+            "Failed to reach target after max attempts"
+        );
         Err(Error::DeviceError(format!(
             "Failed to reach target ({}, {}) after {} attempts",
             target_x, target_y, MAX_ATTEMPTS
@@ -394,9 +432,23 @@ impl InputCtl {
         let target_x = start_x + dx;
         let target_y = start_y + dy;
 
+        debug!(
+            start_x = start_x,
+            start_y = start_y,
+            target_x = target_x,
+            target_y = target_y,
+            dx = dx,
+            dy = dy,
+            duration = duration,
+            fps = fps,
+            "Starting smooth move"
+        );
+
         // Generate waypoints (cumulative offsets from start)
         let waypoints = interpolation::generate_waypoints(dx, dy, duration, curve, noise, fps);
         let delay_ms = ((duration * 1000.0) / waypoints.len() as f64) as u64;
+
+        trace!(waypoints = waypoints.len(), delay_ms = delay_ms, "Generated waypoints");
 
         for (waypoint_x, waypoint_y) in waypoints {
             // Calculate where cursor should be now (absolute position)
@@ -413,7 +465,11 @@ impl InputCtl {
         }
 
         // Final servo correction to guarantee hitting exact target
+        debug!("Starting final servo correction");
         self.move_to_position(target_x, target_y, 2)?;
+
+        let (final_x, final_y) = self.cursor_pos();
+        debug!(final_x = final_x, final_y = final_y, "Smooth move complete");
 
         Ok(())
     }

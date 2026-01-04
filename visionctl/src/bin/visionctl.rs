@@ -4,6 +4,8 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use tracing::{info, debug, warn};
+use tracing_subscriber::EnvFilter;
 use visionctl::{Agent, Config, LlmConfig, VisionCtl};
 
 #[derive(Parser)]
@@ -13,6 +15,14 @@ use visionctl::{Agent, Config, LlmConfig, VisionCtl};
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Increase verbosity (-v info, -vv debug, -vvv trace)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
+    /// Quiet mode (errors only)
+    #[arg(short, long, global = true)]
+    quiet: bool,
 
     /// Question to ask LLM about the screen (default mode)
     #[arg(trailing_var_arg = true)]
@@ -57,8 +67,31 @@ enum Commands {
     Setup,
 }
 
+fn init_logging(verbose: u8, quiet: bool) {
+    let level = if quiet {
+        "error"
+    } else {
+        match verbose {
+            0 => "warn",
+            1 => "info",
+            2 => "debug",
+            _ => "trace",
+        }
+    };
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(format!("visionctl={},inputctl={}", level, level)));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .init();
+}
+
 fn main() -> visionctl::Result<()> {
     let cli = Cli::parse();
+    init_logging(cli.verbose, cli.quiet);
 
     match cli.command {
         Some(Commands::Agent { goal }) => run_agent(&goal),
@@ -146,7 +179,7 @@ fn run_query(question: &str) -> visionctl::Result<()> {
     let screenshot_path = "/tmp/visionctl_last_screenshot.png";
     fs::write(screenshot_path, &screenshot)
         .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
-    eprintln!("Screenshot saved to: {}", screenshot_path);
+    debug!(path = %screenshot_path, "Screenshot saved");
 
     let answer = ctl.ask(question)?;
     println!(
@@ -161,8 +194,7 @@ fn run_query(question: &str) -> visionctl::Result<()> {
 }
 
 fn run_agent(goal: &str) -> visionctl::Result<()> {
-    eprintln!("=== VisionCtl Agent ===");
-    eprintln!("Goal: {}\n", goal);
+    info!(goal = %goal, "Starting agent");
 
     let config = get_llm_config()?;
 
@@ -170,7 +202,11 @@ fn run_agent(goal: &str) -> visionctl::Result<()> {
 
     let result = agent.run(goal)?;
 
-    eprintln!("\n=== Agent Complete ===");
+    info!(
+        success = result.success,
+        iterations = result.iterations,
+        "Agent complete"
+    );
     println!(
         "{}",
         serde_json::json!({
@@ -188,10 +224,10 @@ fn run_screenshot(output_path: &str) -> visionctl::Result<()> {
     let screenshot = VisionCtl::screenshot()?;
     fs::write(output_path, &screenshot)
         .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
-    eprintln!(
-        "Screenshot saved to: {} ({} bytes)",
-        output_path,
-        screenshot.len()
+    info!(
+        path = %output_path,
+        bytes = screenshot.len(),
+        "Screenshot saved"
     );
     Ok(())
 }
@@ -209,13 +245,15 @@ fn run_find_template(
         let screenshot_data = VisionCtl::screenshot()?;
         fs::write(screenshot_path, &screenshot_data)
             .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
-        eprintln!("Screenshot saved to: {}", screenshot_path);
+        debug!(path = %screenshot_path, "Screenshot saved");
         screenshot_path.to_string()
     };
 
-    eprintln!(
-        "Finding template '{}' in '{}' (threshold={})...",
-        template, screenshot_path, threshold
+    info!(
+        template = %template,
+        screenshot = %screenshot_path,
+        threshold = threshold,
+        "Finding template"
     );
 
     let results = visionctl::detection::find_template(&screenshot_path, template, Some(threshold))?;
@@ -225,14 +263,11 @@ fn run_find_template(
 
     // Summary
     if results.is_empty() {
-        eprintln!("\nNo matches found");
+        warn!("No matches found");
     } else {
-        eprintln!("\nFound {} match(es):", results.len());
+        info!(count = results.len(), "Found matches");
         for r in results.iter().take(5) {
-            eprintln!("  ({}, {}) conf={:.3}", r.x, r.y, r.confidence);
-        }
-        if results.len() > 5 {
-            eprintln!("  ... and {} more", results.len() - 5);
+            debug!(x = r.x, y = r.y, confidence = r.confidence, "Match");
         }
     }
 
@@ -246,23 +281,24 @@ fn run_click_template(template: &str, threshold: f32) -> visionctl::Result<()> {
     fs::write(screenshot_path, &screenshot_data)
         .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
 
-    eprintln!("Finding template '{}' (threshold={})...", template, threshold);
+    info!(template = %template, threshold = threshold, "Finding template to click");
 
     let results = visionctl::detection::find_template(screenshot_path, template, Some(threshold))?;
 
     if results.is_empty() {
-        eprintln!("No matches found - cannot click");
+        warn!("No matches found - cannot click");
         return Err(visionctl::Error::ScreenshotFailed(
             "No matches found".to_string(),
         ));
     }
 
     let best = &results[0];
-    eprintln!(
-        "Best match at ({}, {}) conf={:.3}",
-        best.x, best.y, best.confidence
+    info!(
+        x = best.x,
+        y = best.y,
+        confidence = best.confidence,
+        "Clicking best match"
     );
-    eprintln!("Clicking...");
 
     // Click using inputctl
     let status = Command::new("inputctl")
@@ -276,7 +312,7 @@ fn run_click_template(template: &str, threshold: f32) -> visionctl::Result<()> {
         ));
     }
 
-    eprintln!("Clicked at ({}, {})", best.x, best.y);
+    debug!(x = best.x, y = best.y, "Click complete");
     Ok(())
 }
 

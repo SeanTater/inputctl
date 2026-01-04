@@ -1,0 +1,121 @@
+warning: fields `cell_size`, `cols`, `rows`, and `scheme` are never read
+  --> visionctl/src/primitives/grid.rs:86:9
+   |
+85 | pub struct GridMetadata {
+   |            ------------ fields in this struct
+86 |     pub cell_size: u32,
+   |         ^^^^^^^^^
+87 |     pub cols: u32,
+   |         ^^^^
+88 |     pub rows: u32,
+   |         ^^^^
+89 |     pub scheme: LabelScheme,
+   |         ^^^^^^
+   |
+   = note: `GridMetadata` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `width`, `height`, `grid`, and `cursor_pos` are never read
+  --> visionctl/src/primitives/screenshot.rs:22:9
+   |
+20 | pub struct ScreenshotData {
+   |            -------------- fields in this struct
+21 |     pub png_bytes: Vec<u8>,
+22 |     pub width: u32,
+   |         ^^^^^
+23 |     pub height: u32,
+   |         ^^^^^^
+24 |     pub grid: Option<GridMetadata>,
+   |         ^^^^
+25 |     pub cursor_pos: Option<CursorPos>,
+   |         ^^^^^^^^^^
+   |
+   = note: `ScreenshotData` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `visionctl` (lib) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/inputctl-1f4a88ecd0181d36)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+     Running tests/integration.rs (target/debug/deps/integration-48428d92f10b235e)
+
+running 1 test
+
+=== Mouse Movement Accuracy Test ===
+
+Initial cursor position: (3793, 841)
+
+Test: Move right 100px (100, 0)
+  Before: (3793, 841)
+  After:  (3889, 841)
+  Requested: (100, 0)
+  Actual:    (96, 0)
+  Error:     (4, 0)
+  Scale:     (0.9600, 1.0000)
+
+Test: Move down 100px (0, 100)
+  Before: (3889, 841)
+  After:  (3889, 947)
+  Requested: (0, 100)
+  Actual:    (0, 106)
+  Error:     (0, 6)
+  Scale:     (1.0000, 1.0600)
+
+Test: Move left 100px (-100, 0)
+  Before: (3889, 947)
+  After:  (3789, 947)
+  Requested: (-100, 0)
+  Actual:    (-100, 0)
+  Error:     (0, 0)
+  Scale:     (1.0000, 1.0000)
+
+Test: Move up 100px (0, -100)
+  Before: (3789, 947)
+  After:  (3789, 847)
+  Requested: (0, -100)
+  Actual:    (0, -100)
+  Error:     (0, 0)
+  Scale:     (1.0000, 1.0000)
+
+Test: Move diagonal 50,50 (50, 50)
+  Before: (3789, 847)
+  After:  (3839, 897)
+  Requested: (50, 50)
+  Actual:    (50, 50)
+  Error:     (0, 0)
+  Scale:     (1.0000, 1.0000)
+
+Test: Move diagonal -50,-50 (-50, -50)
+  Before: (3839, 897)
+  After:  (3789, 847)
+  Requested: (-50, -50)
+  Actual:    (-50, -50)
+  Error:     (0, 0)
+  Scale:     (1.0000, 1.0000)
+
+=== Scaling Analysis ===
+Average scaling factor: 1.0025
+Compensation factor needed: 0.9975
+All scale factors: [0.96, 1.06, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+=== FAILURES ===
+  right 100px: expected (100, 0), got (96, 0), error (4, 0)
+  down 100px: expected (0, 100), got (0, 106), error (0, 6)
+
+thread 'test_mouse_movement_accuracy' (4052140) panicked at inputctl/tests/integration.rs:276:9:
+
+2 test cases failed. See scaling analysis above.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_mouse_movement_accuracy ... FAILED
+
+failures:
+
+failures:
+    test_mouse_movement_accuracy
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 3.35s
+
+error: test failed, to rerun pass `-p inputctl --test integration`

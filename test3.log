@@ -1,0 +1,126 @@
+warning: fields `cell_size`, `cols`, `rows`, and `scheme` are never read
+  --> visionctl/src/primitives/grid.rs:86:9
+   |
+85 | pub struct GridMetadata {
+   |            ------------ fields in this struct
+86 |     pub cell_size: u32,
+   |         ^^^^^^^^^
+87 |     pub cols: u32,
+   |         ^^^^
+88 |     pub rows: u32,
+   |         ^^^^
+89 |     pub scheme: LabelScheme,
+   |         ^^^^^^
+   |
+   = note: `GridMetadata` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `width`, `height`, `grid`, and `cursor_pos` are never read
+  --> visionctl/src/primitives/screenshot.rs:22:9
+   |
+20 | pub struct ScreenshotData {
+   |            -------------- fields in this struct
+21 |     pub png_bytes: Vec<u8>,
+22 |     pub width: u32,
+   |         ^^^^^
+23 |     pub height: u32,
+   |         ^^^^^^
+24 |     pub grid: Option<GridMetadata>,
+   |         ^^^^
+25 |     pub cursor_pos: Option<CursorPos>,
+   |         ^^^^^^^^^^
+   |
+   = note: `ScreenshotData` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `visionctl` (lib) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/inputctl-1f4a88ecd0181d36)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+     Running tests/integration.rs (target/debug/deps/integration-48428d92f10b235e)
+
+running 1 test
+
+=== Smooth Mouse Movement Accuracy Test ===
+
+Initial cursor position: (3438, 924)
+
+Test: Move right 200px (no noise) (noise=0)
+  Before: (3438, 924)
+  After:  (3647, 924)
+  Requested: (200, 0)
+  Actual:    (209, 0)
+  Error:     (9, 0) [+/-]
+
+Test: Move down 200px (no noise, ease) (noise=0)
+  Before: (3647, 924)
+  After:  (3647, 1216)
+  Requested: (0, 200)
+  Actual:    (0, 292)
+  Error:     (0, 92) [+/-]
+
+Test: Move left 200px (default noise) (noise=2)
+  Before: (3647, 1216)
+  After:  (3438, 1216)
+  Requested: (-200, 0)
+  Actual:    (-209, 0)
+  Error:     (-9, 0) [+/-]
+
+Test: Move up 200px (default noise, ease) (noise=2)
+  Before: (3438, 1216)
+  After:  (3438, 921)
+  Requested: (0, -200)
+  Actual:    (0, -295)
+  Error:     (0, -95) [+/-]
+
+=== Random Movement Tests ===
+Random #1: req=(-214, 207), actual=(-369, 357), error=(-155, 150)
+Random #2: req=(143, -208), actual=(224, -325), error=(81, -117)
+Random #3: req=(-266, -197), actual=(-496, -368), error=(-230, -171)
+Random #4: req=(281, 60), actual=(478, 102), error=(197, 42)
+Random #5: req=(7, 215), actual=(10, 303), error=(3, 88)
+Random #6: req=(-165, -271), actual=(-298, -490), error=(-133, -219)
+Random #7: req=(127, -234), actual=(205, -378), error=(78, -144)
+Random #8: req=(157, -254), actual=(272, -122), error=(115, 132)
+Random #9: req=(95, 43), actual=(96, 44), error=(1, 1)
+Random #10: req=(-297, 253), actual=(-580, 494), error=(-283, 241)
+Random #11: req=(224, -200), actual=(388, -347), error=(164, -147)
+Random #12: req=(92, -206), actual=(134, -191), error=(42, 15)
+Random #13: req=(-256, 175), actual=(-453, 310), error=(-197, 135)
+Random #14: req=(66, -288), actual=(114, -310), error=(48, -22)
+Random #15: req=(-125, 65), actual=(-142, 74), error=(-17, 9)
+Random #16: req=(-52, -15), actual=(-51, -15), error=(1, 0)
+Random #17: req=(237, -189), actual=(414, -59), error=(177, 130)
+Random #18: req=(-25, -247), actual=(-38, 0), error=(-13, 247)
+Random #19: req=(174, -13), actual=(218, 0), error=(44, 13)
+Random #20: req=(219, -163), actual=(354, 0), error=(135, 163)
+
+=== Error Analysis ===
+X-axis errors: min=-283, max=197, avg=2.64
+All X errors: [9, -9, -155, 81, -230, 197, 3, -133, 78, 115, 1, -283, 164, 42, -197, 48, -17, 1, 177, -13, 44, 135]
+Y-axis errors: min=-219, max=247, avg=24.68
+All Y errors: [92, -95, 150, -117, -171, 42, 88, -219, -144, 132, 1, 241, -147, 15, 135, -22, 9, 0, 130, 247, 13, 163]
+
+=== FAILURES ===
+  right 200px (no noise): expected (200, 0), got (209, 0), error (9, 0)
+  down 200px (no noise, ease): expected (0, 200), got (0, 292), error (0, 92)
+  left 200px (default noise): expected (-200, 0), got (-209, 0), error (-9, 0)
+  up 200px (default noise, ease): expected (0, -200), got (0, -295), error (0, -95)
+
+thread 'test_smooth_mouse_movement_accuracy' (4050888) panicked at inputctl/tests/integration.rs:400:9:
+
+4 test cases failed. See error analysis above.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test test_smooth_mouse_movement_accuracy ... FAILED
+
+failures:
+
+failures:
+    test_smooth_mouse_movement_accuracy
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 16.70s
+
+error: test failed, to rerun pass `-p inputctl --test integration`

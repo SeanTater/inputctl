@@ -7,11 +7,9 @@ pub mod templates;
 use crate::{Error, Result};
 use image::{GrayImage, imageops};
 use serde::{Deserialize, Serialize};
+use tracing::trace;
 
 pub use templates::{list_available_templates, find_template_file};
-
-/// Enable verbose debug output (set to false for production)
-const DEBUG: bool = false;
 
 /// Detection result with location and confidence
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,34 +86,20 @@ pub fn find_template(
     // Coarse pass: find candidates with larger stride
     let coarse_candidates = ncc_match(&screenshot_coarse, &template_coarse, coarse_threshold, 2);
 
-    if DEBUG {
-        eprintln!("DEBUG: Screenshot {}x{} -> coarse {}x{}",
-            screenshot_full.width(), screenshot_full.height(), coarse_w, coarse_h);
-        eprintln!("DEBUG: Template {}x{} -> coarse {}x{}",
-            template_full.width(), template_full.height(), tmpl_coarse_w, tmpl_coarse_h);
-        eprintln!("DEBUG: Threshold={}, coarse_threshold={}", threshold, coarse_threshold);
-        eprintln!("DEBUG: Found {} coarse candidates", coarse_candidates.len());
-
-        // Show top 5 by confidence
-        let mut sorted = coarse_candidates.clone();
-        sorted.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
-        eprintln!("DEBUG: Top 5 by confidence:");
-        for (i, (x, y, c)) in sorted.iter().take(5).enumerate() {
-            eprintln!("DEBUG:   #{}: ({}, {}) conf={:.4} -> full ({}, {})",
-                i, x, y, c, (*x as f32 * coarse_scale) as i32, (*y as f32 * coarse_scale) as i32);
-        }
-
-        // Check if expected location (250, 125) is in candidates
-        let expected_coarse_x = 250i32;
-        let expected_coarse_y = 125i32;
-        let near_expected = sorted.iter().filter(|(x, y, _)| {
-            (*x - expected_coarse_x).abs() < 10 && (*y - expected_coarse_y).abs() < 10
-        }).collect::<Vec<_>>();
-        eprintln!("DEBUG: Candidates near expected (250, 125): {}", near_expected.len());
-        for (x, y, c) in near_expected.iter().take(3) {
-            eprintln!("DEBUG:   ({}, {}) conf={:.4}", x, y, c);
-        }
-    }
+    trace!(
+        screenshot_w = screenshot_full.width(),
+        screenshot_h = screenshot_full.height(),
+        coarse_w = coarse_w,
+        coarse_h = coarse_h,
+        template_w = template_full.width(),
+        template_h = template_full.height(),
+        tmpl_coarse_w = tmpl_coarse_w,
+        tmpl_coarse_h = tmpl_coarse_h,
+        threshold = threshold,
+        coarse_threshold = coarse_threshold,
+        candidates = coarse_candidates.len(),
+        "Coarse search complete"
+    );
 
     // Refine each candidate at full resolution
     let mut all_matches: Vec<Detection> = Vec::new();
@@ -137,9 +121,7 @@ pub fn find_template(
         let y_max = (full_y + search_radius).min(screenshot_full.height() as i32 - template_full.height() as i32);
 
         if x_max <= x_min || y_max <= y_min {
-            if DEBUG && i < 3 {
-                eprintln!("DEBUG: Candidate {} ({},{}) skipped - invalid region", i, cx, cy);
-            }
+            trace!(candidate = i, cx = cx, cy = cy, "Skipped - invalid region");
             continue;
         }
 
@@ -154,20 +136,16 @@ pub fn find_template(
             y_max,
         );
 
-        if DEBUG && i < 5 {
-            eprintln!("DEBUG: Refine #{}: coarse ({},{}) conf={:.4} -> full ({},{}) region x=[{},{}] y=[{},{}] -> {} fine matches",
-                i, cx, cy, coarse_conf, full_x, full_y, x_min, x_max, y_min, y_max, fine_matches.len());
-            if fine_matches.is_empty() {
-                // Check what the NCC actually is at the expected location
-                let tmpl_pixels: Vec<f32> = template_full.pixels().map(|p| p.0[0] as f32).collect();
-                let tmpl_mean: f32 = tmpl_pixels.iter().sum::<f32>() / tmpl_pixels.len() as f32;
-                let tmpl_std: f32 = (tmpl_pixels.iter().map(|&p| (p - tmpl_mean).powi(2)).sum::<f32>()
-                    / tmpl_pixels.len() as f32).sqrt();
-                let ncc_at_full = compute_ncc(&screenshot_full, full_x, full_y, &template_full,
-                    template_full.width() as i32, template_full.height() as i32, tmpl_mean, tmpl_std);
-                eprintln!("DEBUG:   NCC at ({},{}) = {:.4}", full_x, full_y, ncc_at_full);
-            }
-        }
+        trace!(
+            candidate = i,
+            coarse_x = cx,
+            coarse_y = cy,
+            coarse_conf = coarse_conf,
+            full_x = full_x,
+            full_y = full_y,
+            fine_matches = fine_matches.len(),
+            "Refined candidate"
+        );
 
         for (x, y, conf) in fine_matches {
             let tw = template_full.width() as i32;

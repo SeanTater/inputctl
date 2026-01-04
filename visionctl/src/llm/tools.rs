@@ -14,24 +14,16 @@ pub fn get_plan_tool() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "plan".to_string(),
-            description: "Create a plan for accomplishing the goal based on what you see on screen.".to_string(),
+            description: "Create a new plan (required on first turn) or update a plan (required when anything goes wrong)".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "observations": {
+                    "text": {
                         "type": "string",
-                        "description": "What you see on screen (windows, buttons, relevant UI elements)"
+                        "description": "The plan text, including what you see on screen, what you need to change, and how you will do it. Go into detail. Use Markdown."
                     },
-                    "target_cell": {
-                        "type": "string",
-                        "description": "The grid cell containing the target element (e.g., 'R1' for row 1 column R)"
-                    },
-                    "action": {
-                        "type": "string",
-                        "description": "What action to take (e.g., 'click the minimize button')"
-                    }
                 },
-                "required": ["observations", "target_cell", "action"]
+                "required": ["text"]
             })
         },
     ]
@@ -40,6 +32,7 @@ pub fn get_plan_tool() -> Vec<ToolDefinition> {
 /// Get action tools (after planning)
 pub fn get_action_tools() -> Vec<ToolDefinition> {
     vec![
+        get_plan_tool().pop().unwrap(),
         ToolDefinition {
             name: "move_direction".to_string(),
             description: "Move the cursor in a direction by a number of pixels. Use this to guide cursor toward a target.".to_string(),
@@ -60,14 +53,28 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
             })
         },
         ToolDefinition {
-            name: "move_to".to_string(),
-            description: "Move the cursor to a grid cell. Use this first to position cursor before clicking.".to_string(),
+            name: "move_to_cell".to_string(),
+            description: "Move the cursor to a grid cell, with an optional pixel offset for precision.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "cell": {
                         "type": "string",
                         "description": "Grid cell to move to (e.g., 'A1', 'R3')"
+                    },
+                    "offset": {
+                        "type": "object",
+                        "description": "Optional pixel offset from the cell center (negative = left/up).",
+                        "properties": {
+                            "x": {
+                                "type": "integer",
+                                "description": "Horizontal offset in pixels from cell center"
+                            },
+                            "y": {
+                                "type": "integer",
+                                "description": "Vertical offset in pixels from cell center"
+                            }
+                        }
                     }
                 },
                 "required": ["cell"]
@@ -118,7 +125,7 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "task_complete".to_string(),
-            description: "Signal that the task is done (success or failure).".to_string(),
+            description: "Signal that the FINAl task is done (success or failure).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -135,8 +142,22 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
             })
         },
         ToolDefinition {
-            name: "list_templates".to_string(),
-            description: "List all available template icons. Use this to discover what icons you can search for with find_template or click_template.".to_string(),
+            name: "scene_note".to_string(),
+            description: "Record a short summary of what you see on screen for future steps.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Short, concrete notes about visible UI elements or state"
+                    }
+                },
+                "required": ["text"]
+            })
+        },
+        ToolDefinition {
+            name: "list_icons".to_string(),
+            description: "List all available icon names. Use this to discover what icons you can move to with move_to_icon.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -144,14 +165,14 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
             })
         },
         ToolDefinition {
-            name: "find_template".to_string(),
-            description: "Find a template icon on screen and report its location. Returns coordinates, confidence, and number of matches. Use when you need to know where an icon is without clicking it.".to_string(),
+            name: "move_to_icon".to_string(),
+            description: "Find an icon on screen and move the cursor to it. Returns coordinates, confidence, and number of matches.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Template name without .png extension (e.g., 'gwenview'). Use list_templates() to see available names."
+                        "description": "Icon name without .png extension (e.g., 'gwenview'). Use list_icons() to see available names."
                     },
                     "threshold": {
                         "type": "number",
@@ -163,30 +184,14 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
             })
         },
         ToolDefinition {
-            name: "click_template".to_string(),
-            description: "Find a template icon on screen and click it. Best for clicking small taskbar icons or UI elements that are hard to target with the grid. Combines find + click in one action.".to_string(),
+            name: "stuck".to_string(),
+            description: "Indicate you are stuck and need help.".to_string(),
             input_schema: json!({
                 "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Template name without .png extension (e.g., 'gwenview')"
-                    },
-                    "button": {
-                        "type": "string",
-                        "enum": ["left", "right", "middle"],
-                        "description": "Mouse button to click",
-                        "default": "left"
-                    },
-                    "threshold": {
-                        "type": "number",
-                        "description": "Confidence threshold 0.0-1.0 (default 0.8)",
-                        "default": 0.8
-                    }
-                },
-                "required": ["name"]
+                "properties": {},
+                "required": []
             })
-        },
+        }
     ]
 }
 
@@ -253,15 +258,29 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 "message": "Plan recorded. Now execute the action."
             }))
         }
-        "move_to" => {
+        "move_to_cell" | "move_to" => {
             let cell = params.get("cell")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'cell' parameter".into()))?;
 
-            ctl.move_to_grid(cell, true)?;
+            let (base_x, base_y) = crate::primitives::grid_to_pixel(cell, &ctl.grid_config)?;
+            let (offset_x, offset_y) = params.get("offset")
+                .and_then(|v| v.as_object())
+                .map(|offset| {
+                    let x = offset.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let y = offset.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    (x, y)
+                })
+                .unwrap_or((0, 0));
+
+            let half_cell = (ctl.grid_config.cell_size as i32) / 2;
+            let clamped_x = offset_x.clamp(-half_cell, half_cell);
+            let clamped_y = offset_y.clamp(-half_cell, half_cell);
+
+            crate::actions::move_to_pixel(base_x + clamped_x, base_y + clamped_y, true)?;
             Ok(json!({
                 "success": true,
-                "message": format!("Moved cursor to cell {}", cell)
+                "message": format!("Moved cursor to cell {} with offset ({}, {})", cell, clamped_x, clamped_y)
             }))
         }
         "click" => {
@@ -363,6 +382,14 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 "is_task_complete": true
             }))
         }
+        "scene_note" => {
+            let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            Ok(json!({
+                "success": true,
+                "message": "Scene note recorded",
+                "text": text
+            }))
+        }
         "target_reached" => {
             let success = params.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
             let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -372,17 +399,18 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 "is_target_reached": true
             }))
         }
-        "list_templates" => {
+        "list_icons" | "list_templates" => {
             use crate::detection;
             let templates = detection::list_available_templates()?;
             Ok(json!({
                 "success": true,
-                "templates": templates,
+                "icons": templates,
                 "count": templates.len()
             }))
         }
-        "find_template" => {
+        "move_to_icon" | "find_template" => {
             use crate::detection;
+            use crate::actions::move_to_pixel;
 
             let name = params.get("name")
                 .and_then(|v| v.as_str())
@@ -416,10 +444,11 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 Ok(json!({
                     "success": false,
                     "found": false,
-                    "message": format!("Template '{}' not found on screen (threshold: {})", name, threshold)
+                    "message": format!("Icon '{}' not found on screen (threshold: {})", name, threshold)
                 }))
             } else {
                 let best = &detections[0];
+                move_to_pixel(best.x, best.y, true)?;
                 Ok(json!({
                     "success": true,
                     "found": true,
@@ -427,74 +456,15 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                     "y": best.y,
                     "confidence": best.confidence,
                     "num_matches": detections.len(),
-                    "message": format!("Found {} match(es) for '{}'", detections.len(), name)
+                    "message": format!("Moved cursor to icon '{}' ({} match(es))", name, detections.len())
                 }))
             }
         }
-        "click_template" => {
-            use crate::detection;
-            use crate::actions::{MouseButton, click_at_pixel};
-
-            let name = params.get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'name' parameter".into()))?;
-
-            let button_str = params.get("button")
-                .and_then(|v| v.as_str())
-                .unwrap_or("left");
-
-            let button = match button_str {
-                "left" => MouseButton::Left,
-                "right" => MouseButton::Right,
-                "middle" => MouseButton::Middle,
-                _ => MouseButton::Left,
-            };
-
-            let threshold = params.get("threshold")
-                .and_then(|v| v.as_f64())
-                .map(|v| v as f32)
-                .unwrap_or(0.8);
-
-            // Take screenshot
-            let screenshot = crate::VisionCtl::screenshot()?;
-            let temp_path = "/tmp/visionctl_template_search.png";
-            std::fs::write(temp_path, &screenshot)
-                .map_err(|e| crate::Error::ScreenshotFailed(format!("Failed to write screenshot: {}", e)))?;
-
-            // Find template file
-            let template_path = detection::find_template_file(name)?;
-
-            // Search for template
-            let detections = detection::find_template(
-                temp_path,
-                template_path.to_str().unwrap(),
-                Some(threshold)
-            )?;
-
-            // Clean up
-            let _ = std::fs::remove_file(temp_path);
-
-            if detections.is_empty() {
-                Ok(json!({
-                    "success": false,
-                    "message": format!("Template '{}' not found on screen (threshold: {})", name, threshold)
-                }))
-            } else {
-                let best = &detections[0];
-
-                // Click at template location
-                click_at_pixel(best.x, best.y, button)?;
-
-                Ok(json!({
-                    "success": true,
-                    "x": best.x,
-                    "y": best.y,
-                    "confidence": best.confidence,
-                    "num_matches": detections.len(),
-                    "message": format!("Clicked template '{}' at ({}, {}) with {:.2} confidence",
-                        name, best.x, best.y, best.confidence)
-                }))
-            }
+        "stuck" => {
+            Ok(json!({
+                "success": true,
+                "message": "Stuck signal received"
+            }))
         }
         _ => {
             Err(crate::Error::ScreenshotFailed(format!("Unknown tool: {}", name)))

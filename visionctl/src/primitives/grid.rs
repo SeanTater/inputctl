@@ -81,6 +81,7 @@ pub struct CursorPos {
 }
 
 /// Grid metadata attached to screenshot
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct GridMetadata {
     pub cell_size: u32,

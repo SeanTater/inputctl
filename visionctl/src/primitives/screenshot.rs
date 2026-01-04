@@ -16,6 +16,7 @@ pub struct ScreenshotOptions {
 }
 
 /// Screenshot data with metadata
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct ScreenshotData {
     pub png_bytes: Vec<u8>,

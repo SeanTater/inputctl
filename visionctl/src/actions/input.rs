@@ -1,8 +1,7 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::primitives::{GridConfig, grid_to_pixel, find_cursor};
+use crate::primitives::find_cursor;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 // Lazy-initialized global InputCtl instance
 static INPUT_CTL: OnceLock<Mutex<inputctl::InputCtl>> = OnceLock::new();
@@ -38,35 +37,6 @@ pub fn click(button: MouseButton) -> Result<()> {
         .map_err(|e| Error::ScreenshotFailed(format!("Mouse click failed: {}", e)))
 }
 
-/// Click at pixel coordinates
-///
-/// Finds current cursor position, moves to target, and clicks
-pub fn click_at_pixel(x: i32, y: i32, button: MouseButton) -> Result<()> {
-    let ctl = get_input_ctl()?;
-    let mut ctl = ctl.lock().unwrap();
-    let fps = get_config().cursor.smooth_fps;
-
-    // Find current cursor position
-    let cursor = find_cursor()?;
-
-    // Calculate relative movement
-    let dx = x - cursor.x;
-    let dy = y - cursor.y;
-
-    // Move smoothly to target with no noise for precision
-    ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0, fps)
-        .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
-
-    // Small delay before clicking
-    std::thread::sleep(Duration::from_millis(50));
-
-    // Click
-    ctl.click(button)
-        .map_err(|e| Error::ScreenshotFailed(format!("Mouse click failed: {}", e)))?;
-
-    Ok(())
-}
-
 /// Move mouse to pixel coordinates
 pub fn move_to_pixel(x: i32, y: i32, smooth: bool) -> Result<()> {
     let ctl = get_input_ctl()?;
@@ -90,36 +60,6 @@ pub fn move_to_pixel(x: i32, y: i32, smooth: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Move mouse by relative pixels (direction-based)
-pub fn move_relative(dx: i32, dy: i32, smooth: bool) -> Result<()> {
-    let ctl = get_input_ctl()?;
-    let mut ctl = ctl.lock().unwrap();
-    let fps = get_config().cursor.smooth_fps;
-
-    if smooth {
-        // No noise for precision targeting
-        ctl.move_mouse_smooth(dx, dy, 0.3, Curve::EaseInOut, 0.0, fps)
-            .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
-    } else {
-        ctl.move_mouse(dx, dy)
-            .map_err(|e| Error::ScreenshotFailed(format!("Mouse movement failed: {}", e)))?;
-    }
-
-    Ok(())
-}
-
-/// Click at grid cell
-pub fn click_at_grid(cell: &str, config: &GridConfig, button: MouseButton) -> Result<()> {
-    let (x, y) = grid_to_pixel(cell, config)?;
-    click_at_pixel(x, y, button)
-}
-
-/// Move to grid cell
-pub fn move_to_grid(cell: &str, config: &GridConfig, smooth: bool) -> Result<()> {
-    let (x, y) = grid_to_pixel(cell, config)?;
-    move_to_pixel(x, y, smooth)
 }
 
 /// Type text using keyboard

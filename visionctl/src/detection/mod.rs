@@ -1,6 +1,8 @@
-//! Pure Rust template matching using Normalized Cross-Correlation (NCC).
+//! Template matching and object detection.
 //!
-//! No Python dependencies - fully self-contained.
+//! This module provides pure-Rust implementations of computer vision algorithms,
+//! primarily Normalized Cross-Correlation (NCC), for finding UI elements and
+//! icons on the screen without external dependencies like OpenCV.
 
 pub mod templates;
 

@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
-use crate::primitives::grid::{GridConfig, GridMetadata, CursorPos, draw_grid_overlay};
+use crate::primitives::grid::{CursorPos, draw_cursor_mark};
+use crate::primitives::screen::Region;
 use std::collections::HashMap;
 use std::io::Read;
 use nix::unistd::pipe2;
@@ -11,8 +12,11 @@ use image::{ImageBuffer, RgbaImage, ImageFormat};
 /// Options for screenshot capture
 #[derive(Clone, Debug, Default)]
 pub struct ScreenshotOptions {
-    pub grid: Option<GridConfig>,
     pub mark_cursor: bool,
+    pub crop_region: Option<Region>,
+    /// If set, the workspace image will be resized to these dimensions before cropping/drawing.
+    /// This allows mapping physical pixels to logical coordinates.
+    pub resize_to_logical: Option<(u32, u32)>,
 }
 
 /// Screenshot data with metadata
@@ -22,7 +26,6 @@ pub struct ScreenshotData {
     pub png_bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub grid: Option<GridMetadata>,
     pub cursor_pos: Option<CursorPos>,
 }
 
@@ -85,23 +88,56 @@ pub fn capture_screenshot(options: ScreenshotOptions) -> Result<ScreenshotData> 
     // Convert BGRA32 to RGBA8
     let mut img = argb_to_rgba_image(&raw_data, width, height, stride)?;
 
-    // Get cursor position if needed
-    let cursor_pos = if options.mark_cursor || options.grid.is_some() {
-        crate::primitives::cursor::find_cursor().ok()
-    } else {
-        None
-    };
+    // Resize to logical dimensions if requested
+    // This is the key to fixing Wayland scaling issues.
+    if let Some((target_w, target_h)) = options.resize_to_logical {
+        if target_w != width || target_h != height {
+            img = image::imageops::resize(&img, target_w, target_h, image::imageops::FilterType::Lanczos3);
+        }
+    }
 
-    // Draw grid overlay if requested
-    let grid_metadata = if let Some(ref grid_config) = options.grid {
-        draw_grid_overlay(&mut img, grid_config, cursor_pos.as_ref());
+    // Crop if requested
+    if let Some(region) = options.crop_region {
+        // Verify crop bounds
+        if region.x >= 0 && region.y >= 0 && 
+           (region.x + region.width as i32) <= width as i32 && 
+           (region.y + region.height as i32) <= height as i32 {
+            img = image::imageops::crop(&mut img, region.x as u32, region.y as u32, region.width, region.height).to_image();
+        } else {
+             return Err(Error::ScreenshotFailed(format!("Crop region {:?} out of bounds for image {}x{}", region, width, height)));
+        }
+    }
 
-        Some(GridMetadata {
-            cell_size: grid_config.cell_size,
-            cols: (width + grid_config.cell_size - 1) / grid_config.cell_size,
-            rows: (height + grid_config.cell_size - 1) / grid_config.cell_size,
-            scheme: grid_config.label_scheme.clone(),
-        })
+    // Get cursor position and draw marker if requested
+
+    let cursor_pos = if options.mark_cursor {
+        let pos = crate::primitives::cursor::find_cursor().ok();
+        if let Some(ref p) = pos {
+            // If cropping, check if cursor is visible and adjust relative coords for drawing?
+            // Actually, we usually draw the mark on the final image.
+            // If we cropped, we need to adjust the cursor position relative to the crop to draw it safely.
+            // But wait, if we modify `img` above (by cropping), `img` is now the crop.
+            // So we need to translate the global cursor `p` to local `p`.
+            
+            let should_draw = if let Some(region) = options.crop_region {
+                // Check if cursor is inside
+                region.contains(p.x, p.y)
+            } else {
+                true
+            };
+
+            if should_draw {
+                 let draw_x = if let Some(region) = options.crop_region { p.x - region.x } else { p.x };
+                 let draw_y = if let Some(region) = options.crop_region { p.y - region.y } else { p.y };
+                 
+                 // We need a temp local struct to pass to draw_cursor_mark because it probably takes CursorPos
+                 // Let's assume draw_cursor_mark handles bounds checking or we should.
+                 // For now, let's construct a local pos.
+                 let local_pos = CursorPos { x: draw_x, y: draw_y, grid_cell: None };
+                 draw_cursor_mark(&mut img, &local_pos);
+            }
+        }
+        pos
     } else {
         None
     };
@@ -111,11 +147,16 @@ pub fn capture_screenshot(options: ScreenshotOptions) -> Result<ScreenshotData> 
     img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
         .map_err(|e| Error::ScreenshotFailed(format!("PNG encoding failed: {}", e)))?;
 
+    let (final_width, final_height) = if let Some((tw, th)) = options.resize_to_logical {
+        (tw, th)
+    } else {
+        (width, height)
+    };
+
     Ok(ScreenshotData {
         png_bytes,
-        width,
-        height,
-        grid: grid_metadata,
+        width: final_width,
+        height: final_height,
         cursor_pos,
     })
 }

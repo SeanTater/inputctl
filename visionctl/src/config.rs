@@ -1,7 +1,14 @@
+//! Persistent configuration management for visionctl.
+//!
+//! This module handles loading and saving settings from `~/.config/visionctl/config.toml`,
+//! including LLM backend details and UI preferences.
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tracing::warn;
+use crate::error::Result;
+use crate::llm::LlmConfig;
 
 /// Main configuration for visionctl
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -10,6 +17,8 @@ pub struct Config {
     pub llm: LlmSettings,
     #[serde(default)]
     pub cursor: CursorSettings,
+    #[serde(default)]
+    pub pointing: Option<LlmSettings>,
 }
 
 impl Default for Config {
@@ -17,6 +26,7 @@ impl Default for Config {
         Self {
             llm: LlmSettings::default(),
             cursor: CursorSettings::default(),
+            pointing: None,
         }
     }
 }
@@ -32,6 +42,12 @@ pub struct LlmSettings {
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+}
+
+fn default_temperature() -> f32 {
+    0.0  // Deterministic by default for GUI automation
 }
 
 fn default_backend() -> String {
@@ -46,6 +62,39 @@ fn default_model() -> String {
     "qwen3-vl:30b".to_string()
 }
 
+impl LlmSettings {
+    pub fn to_llm_config(&self) -> Result<LlmConfig> {
+        match self.backend.to_lowercase().as_str() {
+            "ollama" => Ok(LlmConfig::Ollama {
+                url: self.base_url.clone(),
+                model: self.model.clone(),
+                temperature: self.temperature,
+            }),
+            "vllm" => Ok(LlmConfig::Vllm {
+                url: self.base_url.clone(),
+                model: self.model.clone(),
+                api_key: self.api_key.clone(),
+                temperature: self.temperature,
+            }),
+            "openai" => {
+                let api_key = self.api_key.clone().ok_or_else(|| {
+                    crate::Error::LlmApiError("API key required for OpenAI backend".to_string())
+                })?;
+                Ok(LlmConfig::OpenAI {
+                    url: self.base_url.clone(),
+                    model: self.model.clone(),
+                    api_key,
+                    temperature: self.temperature,
+                })
+            }
+            _ => Err(crate::Error::LlmApiError(format!(
+                "Unknown backend: {}. Must be 'ollama', 'vllm', or 'openai'",
+                self.backend
+            ))),
+        }
+    }
+}
+
 impl Default for LlmSettings {
     fn default() -> Self {
         Self {
@@ -53,6 +102,7 @@ impl Default for LlmSettings {
             base_url: default_base_url(),
             model: default_model(),
             api_key: None,
+            temperature: default_temperature(),
         }
     }
 }

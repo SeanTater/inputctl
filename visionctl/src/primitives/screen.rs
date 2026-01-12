@@ -1,4 +1,11 @@
+//! Screen and window management primitives.
+//!
+//! This module provides the [`Region`] and [`Window`] types, as well as functions
+//! to list windows and get screen dimensions, primarily targeting Wayland desktops
+//! via D-Bus interfaces.
+
 use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::process::Command;
 use std::sync::Mutex;
@@ -12,6 +19,32 @@ use zvariant::ObjectPath;
 pub struct ScreenDimensions {
     pub width: u32,
     pub height: u32,
+}
+
+/// A rectangular region on the screen
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Region {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Region {
+    pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Check if a point is within the region
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.x + self.width as i32 &&
+        y >= self.y && y < self.y + self.height as i32
+    }
 }
 
 /// Cached screen dimensions with timestamp
@@ -157,6 +190,151 @@ fn query_screen_dimensions_uncached() -> Result<ScreenDimensions> {
         "Screen dimensions not found in journal (marker: {})",
         marker
     )))
+}
+
+/// A window on the screen
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Window {
+    pub id: String,
+    pub title: String,
+    pub region: Region,
+}
+
+/// List all available windows (clients) from KWin
+pub fn list_windows() -> Result<Vec<Window>> {
+    // Generate a unique marker for this query
+    let marker = format!("VISIONCTL_WINDOWS_{}", std::process::id());
+
+    // Create temp script that prints window info
+    let script_file = NamedTempFile::with_suffix(".js")
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to create script file: {}", e)))?;
+
+    // We use workspace.windowList() (Plasma 6) or workspace.clientList() (Plasma 5/Early 6)
+    // trying windowList() first as it's cleaner for modern KWin
+    let script_content = format!(
+        r#"
+        const clients = workspace.windowList();
+        for (let i = 0; i < clients.length; i++) {{
+            const c = clients[i];
+            // Format: MARKER_internalId_x_y_width_height_caption
+            print("{}_" + c.internalId + "_" + c.x + "_" + c.y + "_" + c.width + "_" + c.height + "_" + c.caption);
+        }}
+    "#,
+        marker
+    );
+
+    fs::write(script_file.path(), &script_content)
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to write script: {}", e)))?;
+
+    // Connect to DBus and load the script
+    let conn = Connection::session()
+        .map_err(|e| Error::ScreenshotFailed(format!("DBus connection failed: {}", e)))?;
+
+    let proxy = zbus::blocking::Proxy::new(
+        &conn,
+        "org.kde.KWin",
+        "/Scripting",
+        "org.kde.kwin.Scripting",
+    )
+    .map_err(|e| Error::ScreenshotFailed(format!("KWin Scripting interface not found: {}", e)))?;
+
+    // Load the script
+    let script_path = script_file.path().to_string_lossy().to_string();
+    let script_id: i32 = proxy
+        .call_method("loadScript", &(&script_path,))
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to load script: {}", e)))?
+        .body()
+        .deserialize()
+        .map_err(|e| Error::ScreenshotFailed(format!("Invalid script ID: {}", e)))?;
+
+    // Run the script
+    let script_path_str = format!("/Scripting/Script{}", script_id);
+    let script_obj_path = ObjectPath::try_from(script_path_str.as_str())
+        .map_err(|e| Error::ScreenshotFailed(format!("Invalid script path: {}", e)))?;
+
+    let script_proxy = zbus::blocking::Proxy::new(
+        &conn,
+        "org.kde.KWin",
+        script_obj_path,
+        "org.kde.kwin.Script",
+    )
+    .map_err(|e| Error::ScreenshotFailed(format!("Script proxy failed: {}", e)))?;
+
+    script_proxy
+        .call_method("run", &())
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to run script: {}", e)))?;
+
+    // Give script time to execute
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Read from journalctl
+    let output = Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            "plasma-kwin_wayland",
+            "-n",
+            "200", // Need more lines for windows
+            "--no-pager",
+            "-o",
+            "cat",
+        ])
+        .output()
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to run journalctl: {}", e)))?;
+
+    let journal_output = String::from_utf8_lossy(&output.stdout);
+
+    // Unload the script
+    let _ = proxy.call_method("unloadScript", &(&script_path,));
+
+    let mut windows = Vec::new();
+    let marker_pat = format!("{}_", marker);
+
+    for line in journal_output.lines().rev() {
+        if let Some(data) = line.split(&marker_pat).nth(1) {
+            // Parse "internalId_x_y_width_height_caption"
+            // Note: caption might contain underscores, so LIMIT split
+            let parts: Vec<&str> = data.splitn(6, '_').collect();
+            if parts.len() == 6 {
+                let id = parts[0].to_string();
+                let x = parts[1].parse::<f64>().unwrap_or(0.0) as i32;
+                let y = parts[2].parse::<f64>().unwrap_or(0.0) as i32;
+                let width = parts[3].parse::<f64>().unwrap_or(0.0) as u32;
+                let height = parts[4].parse::<f64>().unwrap_or(0.0) as u32;
+                let title = parts[5].to_string();
+
+                windows.push(Window {
+                    id,
+                    title,
+                    region: Region { x, y, width, height },
+                });
+            }
+        }
+    }
+    
+    // Reverse to match original order (we iterated rev() to find recent first)
+    // But since unrelated lines are skipped, order might be mixed if we read too far back.
+    // Ideally we filter by unique ID and take the most recent occurrence? 
+    // Yes, KWin prints once. `journalctl -n 200` might contain stale runs if we run fast.
+    // The marker includes process ID, so that helps uniqueness per run.
+    windows.reverse();
+    Ok(windows)
+}
+
+/// Find a window by title substring
+pub fn find_window(name: &str) -> Result<Option<Window>> {
+    let windows = list_windows()?;
+    let name_lower = name.to_lowercase();
+    
+    // Find best match (exact match > substring match)
+    // Or just first substring match
+    for win in windows {
+        if win.title.to_lowercase().contains(&name_lower) {
+            return Ok(Some(win));
+        }
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 /// Simple Screenshot Test - No LLM Required
 ///
-/// This example captures a screenshot with grid overlay and saves it to a file.
+/// This example captures a screenshot with cursor marker and saves it to a file.
 /// Useful for testing that the screenshot functionality works without needing
 /// an LLM backend.
 ///
@@ -21,8 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create headless controller (no LLM needed)
     let ctl = VisionCtl::new_headless();
 
-    println!("Step 1: Capturing screenshot with grid overlay...");
-    let png_bytes = ctl.screenshot_with_grid()?;
+    println!("Step 1: Capturing screenshot with cursor marker...");
+    let png_bytes = ctl.screenshot_with_cursor()?;
     println!("✓ Screenshot captured: {} bytes\n", png_bytes.len());
 
     // Save to file
@@ -33,10 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Screenshot saved\n");
 
     println!("=== Test Complete ===");
-    println!("\nYou can now open the screenshot to verify the grid overlay:");
+    println!("\nYou can now open the screenshot to verify:");
     println!("  xdg-open {}", output_path);
-    println!("\nThe grid should show letter-number coordinates (A1, B2, C3, etc.)");
-    println!("with 100px cells by default.\n");
+    println!("\nThe screenshot should show the current cursor position marked with a red crosshair.\n");
 
     Ok(())
 }

@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::primitives::grid::{CursorPos, GridConfig, pixel_to_grid};
+use crate::primitives::grid::CursorPos;
 use std::fs;
 use std::process::Command;
 use std::time::Duration;
@@ -9,13 +9,8 @@ use zvariant::ObjectPath;
 
 /// Find cursor position using KWin
 ///
-/// Returns cursor coordinates and optionally maps to grid cell
+/// Returns cursor coordinates
 pub fn find_cursor() -> Result<CursorPos> {
-    find_cursor_with_grid(None)
-}
-
-/// Find cursor position and optionally map to grid cell
-pub fn find_cursor_with_grid(grid_config: Option<&GridConfig>) -> Result<CursorPos> {
     // Generate a unique marker for this query
     let marker = format!("VISIONCTL_CURSOR_{}", std::process::id());
 
@@ -91,8 +86,7 @@ pub fn find_cursor_with_grid(grid_config: Option<&GridConfig>) -> Result<CursorP
                 let y: i32 = parts[parts.len() - 1].parse()
                     .map_err(|_| Error::ScreenshotFailed(format!("Invalid y in: {}", line)))?;
 
-                let grid_cell = grid_config.map(|config| pixel_to_grid(x, y, config));
-                return Ok(CursorPos { x, y, grid_cell });
+                return Ok(CursorPos { x, y, grid_cell: None });
             }
         }
     }

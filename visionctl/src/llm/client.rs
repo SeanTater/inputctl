@@ -1,3 +1,8 @@
+//! HTTP client for interacting with LLM backends.
+//!
+//! This module implements the communication layer for Ollama, vLLM, and OpenAI,
+//! supporting both simple vision queries and complex multi-turn chats with tool calling.
+
 use crate::error::{Error, Result};
 use crate::llm::tools::ToolDefinition;
 use base64::{engine::general_purpose, Engine as _};
@@ -8,9 +13,9 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub enum LlmConfig {
-    Ollama { url: String, model: String },
-    Vllm { url: String, model: String, api_key: Option<String> },
-    OpenAI { url: String, model: String, api_key: String },
+    Ollama { url: String, model: String, temperature: f32 },
+    Vllm { url: String, model: String, api_key: Option<String>, temperature: f32 },
+    OpenAI { url: String, model: String, api_key: String, temperature: f32 },
 }
 
 /// Message in a conversation
@@ -74,14 +79,14 @@ impl LlmClient {
         let image_base64 = general_purpose::STANDARD.encode(image_bytes);
 
         match &self.config {
-            LlmConfig::Ollama { url, model } => {
-                self.query_ollama(url, model, &image_base64, prompt)
+            LlmConfig::Ollama { url, model, temperature } => {
+                self.query_ollama(url, model, &image_base64, prompt, *temperature)
             }
-            LlmConfig::Vllm { url, model, api_key } => {
-                self.query_openai_compatible(url, model, api_key.as_deref(), &image_base64, prompt)
+            LlmConfig::Vllm { url, model, api_key, temperature } => {
+                self.query_openai_compatible(url, model, api_key.as_deref(), &image_base64, prompt, *temperature)
             }
-            LlmConfig::OpenAI { url, model, api_key } => {
-                self.query_openai_compatible(url, model, Some(api_key.as_str()), &image_base64, prompt)
+            LlmConfig::OpenAI { url, model, api_key, temperature } => {
+                self.query_openai_compatible(url, model, Some(api_key.as_str()), &image_base64, prompt, *temperature)
             }
         }
     }
@@ -94,14 +99,14 @@ impl LlmClient {
         image: Option<&[u8]>,
     ) -> Result<ChatResponse> {
         match &self.config {
-            LlmConfig::Ollama { url, model } => {
-                self.chat_ollama_with_tools(url, model, messages, tools, image)
+            LlmConfig::Ollama { url, model, temperature } => {
+                self.chat_ollama_with_tools(url, model, messages, tools, image, *temperature)
             }
-            LlmConfig::Vllm { url, model, api_key } => {
-                self.chat_openai_compatible_with_tools(url, model, api_key.as_deref(), messages, tools, image)
+            LlmConfig::Vllm { url, model, api_key, temperature } => {
+                self.chat_openai_compatible_with_tools(url, model, api_key.as_deref(), messages, tools, image, *temperature)
             }
-            LlmConfig::OpenAI { url, model, api_key } => {
-                self.chat_openai_compatible_with_tools(url, model, Some(api_key.as_str()), messages, tools, image)
+            LlmConfig::OpenAI { url, model, api_key, temperature } => {
+                self.chat_openai_compatible_with_tools(url, model, Some(api_key.as_str()), messages, tools, image, *temperature)
             }
         }
     }
@@ -113,6 +118,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDefinition],
         image: Option<&[u8]>,
+        temperature: f32,
     ) -> Result<ChatResponse> {
         let endpoint = format!("{}/api/chat", url.trim_end_matches('/'));
 
@@ -176,7 +182,10 @@ impl LlmClient {
             "model": model,
             "messages": ollama_messages,
             "tools": ollama_tools,
-            "stream": false
+            "stream": false,
+            "options": {
+                "temperature": temperature
+            }
         });
 
         let response = self.client
@@ -232,6 +241,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDefinition],
         image: Option<&[u8]>,
+        temperature: f32,
     ) -> Result<ChatResponse> {
         let endpoint = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
 
@@ -313,6 +323,7 @@ impl LlmClient {
             "model": model,
             "messages": openai_messages,
             "tools": openai_tools,
+            "temperature": temperature,
         });
 
         let mut request = self.client.post(&endpoint).json(&body);
@@ -369,14 +380,17 @@ impl LlmClient {
         Ok(ChatResponse { content, tool_calls })
     }
 
-    fn query_ollama(&self, url: &str, model: &str, image: &str, prompt: &str) -> Result<String> {
+    fn query_ollama(&self, url: &str, model: &str, image: &str, prompt: &str, temperature: f32) -> Result<String> {
         let endpoint = format!("{}/api/generate", url.trim_end_matches('/'));
 
         let body = json!({
             "model": model,
             "prompt": prompt,
             "images": [image],
-            "stream": false
+            "stream": false,
+            "options": {
+                "temperature": temperature
+            }
         });
 
         let response = self.client
@@ -405,11 +419,13 @@ impl LlmClient {
         api_key: Option<&str>,
         image: &str,
         prompt: &str,
+        temperature: f32,
     ) -> Result<String> {
         let endpoint = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
 
         let body = json!({
             "model": model,
+            "temperature": temperature,
             "messages": [
                 {
                     "role": "user",

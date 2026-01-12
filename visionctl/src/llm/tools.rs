@@ -1,8 +1,15 @@
+//! Tool definitions and execution logic for LLM-driven actions.
+//!
+//! This module defines the tools available to the [`Agent`], such as
+//! `type_text`, `move_to`, `click`, and `ask_screen`. It also handles
+//! the mapping between LLM function calls and local Rust functions.
+
 use crate::{Result, VisionCtl};
 use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
 
 /// Tool definition for LLM tool-calling APIs (Anthropic/OpenAI compatible)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
@@ -34,50 +41,21 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
     vec![
         get_plan_tool().pop().unwrap(),
         ToolDefinition {
-            name: "move_direction".to_string(),
-            description: "Move the cursor in a direction by a number of pixels. Use this to guide cursor toward a target.".to_string(),
+            name: "move_to".to_string(),
+            description: "Move the cursor to a position using normalized 0-1000 coordinates. (0,0) is top-left, (1000,1000) is bottom-right.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "direction": {
-                        "type": "string",
-                        "enum": ["up", "down", "left", "right"],
-                        "description": "Direction to move the cursor"
-                    },
-                    "pixels": {
+                    "x": {
                         "type": "integer",
-                        "description": "Number of pixels to move (typically 50-300)"
-                    }
-                },
-                "required": ["direction", "pixels"]
-            })
-        },
-        ToolDefinition {
-            name: "move_to_cell".to_string(),
-            description: "Move the cursor to a grid cell, with an optional pixel offset for precision.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "cell": {
-                        "type": "string",
-                        "description": "Grid cell to move to (e.g., 'A1', 'R3')"
+                        "description": "X coordinate (0-1000, where 0=left edge, 1000=right edge)"
                     },
-                    "offset": {
-                        "type": "object",
-                        "description": "Optional pixel offset from the cell center (negative = left/up).",
-                        "properties": {
-                            "x": {
-                                "type": "integer",
-                                "description": "Horizontal offset in pixels from cell center"
-                            },
-                            "y": {
-                                "type": "integer",
-                                "description": "Vertical offset in pixels from cell center"
-                            }
-                        }
+                    "y": {
+                        "type": "integer",
+                        "description": "Y coordinate (0-1000, where 0=top edge, 1000=bottom edge)"
                     }
                 },
-                "required": ["cell"]
+                "required": ["x", "y"]
             })
         },
         ToolDefinition {
@@ -191,6 +169,38 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
                 "properties": {},
                 "required": []
             })
+        },
+        ToolDefinition {
+            name: "point_at".to_string(),
+            description: "Find an object on screen using a secondary vision model (pointing specialist). Moves mouse and returns coordinates. Use for finding specific buttons, icons, or UI elements.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "Natural language description of what to find (e.g., 'the close button', 'the search bar')."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional: Specific pointing model to use (e.g., 'qwen2-vl:2b'). Defaults to the configured LLM."
+                    }
+                },
+                "required": ["description"]
+            })
+        },
+        ToolDefinition {
+            name: "ask_screen".to_string(),
+            description: "Ask a question about the current screen state. Use this to verify the result of an action or check the state of the UI.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask about the screen content."
+                    }
+                },
+                "required": ["question"]
+            })
         }
     ]
 }
@@ -204,46 +214,63 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
 /// Execute a tool by name with parameters
 pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value> {
-    match name {
-        "move_direction" => {
-            let direction = params.get("direction")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'direction' parameter".into()))?;
+    // Log tool call with arguments
+    tracing::debug!(
+        tool = %name,
+        args = %serde_json::to_string(&params).unwrap_or_else(|_| "serialization failed".to_string()),
+        "Executing tool"
+    );
+    
+    let result = match name {
+        "move_to" => {
+            let x = params.get("x")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'x' parameter".into()))? as i32;
+            let y = params.get("y")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'y' parameter".into()))? as i32;
 
-            // Support both percent (new) and pixels (legacy)
-            let (pixels, is_percent) = if let Some(pct) = params.get("percent").and_then(|v| v.as_i64()) {
-                // Convert percentage to pixels using actual screen dimensions
-                let dims = crate::primitives::get_screen_dimensions()?;
-                let px = match direction {
-                    "left" | "right" => (dims.width as i64 * pct / 100) as i32,
-                    "up" | "down" => (dims.height as i64 * pct / 100) as i32,
-                    _ => 100,
-                };
-                (px, true)
-            } else if let Some(px) = params.get("pixels").and_then(|v| v.as_i64()) {
-                (px as i32, false)
-            } else {
-                return Err(crate::Error::ScreenshotFailed("Missing 'percent' or 'pixels' parameter".into()));
-            };
+            // Use VisionCtl's coordinate conversion (respects viewport)
+            let (px, py) = ctl.to_screen_coords(x, y)?;
 
-            let (dx, dy) = match direction {
-                "up" => (0, -pixels),
-                "down" => (0, pixels),
-                "left" => (-pixels, 0),
-                "right" => (pixels, 0),
-                _ => return Err(crate::Error::ScreenshotFailed(format!("Invalid direction: {}", direction))),
-            };
-
-            crate::actions::move_relative(dx, dy, true)?;
-            let msg = if is_percent {
-                format!("Moved cursor {} ({}% = {}px)", direction, params.get("percent").unwrap(), pixels)
-            } else {
-                format!("Moved cursor {} by {}px", direction, pixels)
-            };
+            crate::actions::move_to_pixel(px, py, true)?;
             Ok(json!({
                 "success": true,
-                "message": msg
+                "message": format!("Moved cursor to ({}, {}) [pixel: ({}, {})]", x, y, px, py)
             }))
+        }
+        "set_viewport" => {
+            let _x = params.get("x").and_then(|v| v.as_i64()).map(|v| v as i32);
+            let _y = params.get("y").and_then(|v| v.as_i64()).map(|v| v as i32);
+            let _width = params.get("width").and_then(|v| v.as_i64()).map(|v| v as u32);
+            let _height = params.get("height").and_then(|v| v.as_i64()).map(|v| v as u32);
+            
+            // This is a bit tricky because VisionCtl is immutable in execute_tool signature?
+            // Ah, execute_tool takes &VisionCtl. We need interior mutability or change signature.
+            // But VisionCtl is designed to be shared.
+            // Actually, we didn't add interior mutability for viewport in VisionCtl (it's not Mutex/RefCell).
+            // That's a blocker. We should have used a RefCell or Mutex for viewport if we want to change it at runtime via tools.
+            // Or `execute_tool` should take `&mut VisionCtl`.
+            // Let's check `execute_tool` signature. It's `&VisionCtl`.
+            // Checking `src/lib.rs`, `VisionCtl` struct fields are just `Option<T>`.
+            // We need to change `VisionCtl` to use `Mutex<Option<Region>>` for the viewport if we want to change it.
+            // Or assume the agent loop handles viewport changes?
+            // The task was "Refactor visionctl to work with ... region", so presumably the tool should be able to set it?
+            // Or maybe it's set by the caller?
+            // Let's stick to the plan. `set_viewport` is not in the original tool list in `tools.rs`. 
+            // The plan didn't explicitly say we'd add a `set_viewport` tool for the LLM. 
+            // It said "Update VisionCtl to manage an active viewport".
+            // Since we are adding `set_viewport` method to `VisionCtl`, we probably want to expose it?
+            // But for now let's just make sure `move_to` works.
+            
+            // Wait, if I can't set the viewport via tool, how does it get set?
+            // Maybe we just expose it for the embedding application?
+            // The user request was "refactor visionctl to work with ... a window ...".
+            // Usually this means the meaningful "screen" is set programmatically.
+            // But for testing we might want to set it.
+            // Let's assume for now `move_to` is the priority.
+            
+            Err(crate::Error::ScreenshotFailed("set_viewport tool not implemented yet".into()))
         }
         "plan" => {
             // Plan is informational - just echo back the plan
@@ -256,31 +283,6 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 "target_cell": target_cell,
                 "action": action,
                 "message": "Plan recorded. Now execute the action."
-            }))
-        }
-        "move_to_cell" | "move_to" => {
-            let cell = params.get("cell")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'cell' parameter".into()))?;
-
-            let (base_x, base_y) = crate::primitives::grid_to_pixel(cell, &ctl.grid_config)?;
-            let (offset_x, offset_y) = params.get("offset")
-                .and_then(|v| v.as_object())
-                .map(|offset| {
-                    let x = offset.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                    let y = offset.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                    (x, y)
-                })
-                .unwrap_or((0, 0));
-
-            let half_cell = (ctl.grid_config.cell_size as i32) / 2;
-            let clamped_x = offset_x.clamp(-half_cell, half_cell);
-            let clamped_y = offset_y.clamp(-half_cell, half_cell);
-
-            crate::actions::move_to_pixel(base_x + clamped_x, base_y + clamped_y, true)?;
-            Ok(json!({
-                "success": true,
-                "message": format!("Moved cursor to cell {} with offset ({}, {})", cell, clamped_x, clamped_y)
             }))
         }
         "click" => {
@@ -299,47 +301,6 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             Ok(json!({
                 "success": true,
                 "message": format!("Clicked {} button at current position", button_str)
-            }))
-        }
-        // Legacy tools for backwards compatibility
-        "screenshot" => {
-            let png_bytes = ctl.screenshot_with_grid()?;
-            Ok(json!({
-                "success": true,
-                "message": "Screenshot captured with grid overlay",
-                "size_bytes": png_bytes.len()
-            }))
-        }
-        "click_at_grid" => {
-            let cell = params.get("cell")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'cell' parameter".into()))?;
-
-            let button_str = params.get("button")
-                .and_then(|v| v.as_str())
-                .unwrap_or("left");
-
-            let button = match button_str {
-                "right" => crate::MouseButton::Right,
-                "middle" => crate::MouseButton::Middle,
-                _ => crate::MouseButton::Left,
-            };
-
-            ctl.click_at_grid_with_button(cell, button)?;
-            Ok(json!({
-                "success": true,
-                "message": format!("Clicked at grid cell {}", cell)
-            }))
-        }
-        "move_to_grid" => {
-            let cell = params.get("cell")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'cell' parameter".into()))?;
-
-            ctl.move_to_grid(cell, true)?;
-            Ok(json!({
-                "success": true,
-                "message": format!("Moved to grid cell {}", cell)
             }))
         }
         "type_text" => {
@@ -366,12 +327,28 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
         }
         "find_cursor" => {
             let cursor = ctl.find_cursor()?;
-            Ok(json!({
-                "success": true,
-                "x": cursor.x,
-                "y": cursor.y,
-                "grid_cell": cursor.grid_cell
-            }))
+            // Return normalized 0-1000 coordinates relative to viewport
+            let norm_res = ctl.to_normalized_coords(cursor.x, cursor.y)?;
+
+            if let Some((norm_x, norm_y)) = norm_res {
+                Ok(json!({
+                    "success": true,
+                    "x": norm_x,
+                    "y": norm_y,
+                    "pixel_x": cursor.x,
+                    "pixel_y": cursor.y,
+                    "in_viewport": true
+                }))
+            } else {
+                 Ok(json!({
+                    "success": true, 
+                    // We don't return x,y if outside viewport
+                    "pixel_x": cursor.x,
+                    "pixel_y": cursor.y,
+                    "in_viewport": false,
+                    "message": "Cursor is outside the active viewport"
+                }))
+            }
         }
         "task_complete" => {
             let success = params.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -460,6 +437,79 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 }))
             }
         }
+        "point_at" => {
+            let description = params.get("description")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'description' parameter".into()))?;
+            
+            let _model_override = params.get("model").and_then(|v| v.as_str());
+
+            // Check for high resolution which might cause pointing inaccuracies
+            let (width, height) = if let Some(region) = ctl.get_viewport() {
+                (region.width, region.height)
+            } else if let Ok(dims) = crate::primitives::get_screen_dimensions() {
+                (dims.width, dims.height)
+            } else {
+                (0, 0)
+            };
+
+            if width > 1920 || height > 1080 {
+                tracing::warn!(
+                    width = width,
+                    height = height,
+                    "High resolution detected. Pointing model accuracy may be reduced due to downsampling. Small text may be illegible."
+                );
+            }
+
+            // 1. Query the pointing model
+            // For this sketch, we reuse the existing LLM client but could easily 
+            // swap it for a dedicated 'tiny' model client.
+            let prompt = format!(
+                "You are a pointing specialist. Find the following element on screen: {}. \
+                Return your response in JSON format: {{\"bbox_2d\": [x1, y1, x2, y2], \"label\": \"object_label\"}}. \
+                Coordinates should be normalized 0-1000 where 0 is top/left and 1000 is bottom/right. \
+                Only return the JSON object, no other text.", 
+                description
+            );
+            
+            let response = ctl.ask_pointing(&prompt)?;
+            
+            // 3. Parse coordinates (simple greedy [x, y] extraction)
+            let coords = parse_coordinates(&response);
+            
+            match coords {
+                Some((x, y)) => {
+                    // x, y are normalized within the viewport (0-1000)
+                    // VisionCtl::move_to handles translation to pixels using the viewport
+                    ctl.move_to(x, y, true)?;
+                    Ok(json!({
+                        "success": true,
+                        "x": x,
+                        "y": y,
+                        "message": format!("Pointed at '{}' at ({}, {})", description, x, y)
+                    }))
+                }
+                None => {
+                    Ok(json!({
+                        "success": false,
+                        "message": format!("Could not parse coordinates from model response: {}", response)
+                    }))
+                }
+            }
+        }
+        "ask_screen" => {
+            let question = params.get("question")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'question' parameter".into()))?;
+
+            let answer = ctl.ask(question)?;
+            Ok(json!({
+                "success": true,
+                "question": question,
+                "answer": answer,
+                "message": format!("Answer: {}", answer)
+            }))
+        }
         "stuck" => {
             Ok(json!({
                 "success": true,
@@ -469,5 +519,78 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
         _ => {
             Err(crate::Error::ScreenshotFailed(format!("Unknown tool: {}", name)))
         }
+    };
+    
+    // Log the result
+    match &result {
+        Ok(res) => {
+            if let Some(success) = res.get("success").and_then(|v| v.as_bool()) {
+                if success {
+                    tracing::info!(
+                        tool = %name,
+                        result = %serde_json::to_string(res).unwrap_or_else(|_| "serialization failed".to_string()),
+                        "Tool executed successfully"
+                    );
+                } else {
+                    tracing::warn!(
+                        tool = %name,
+                        result = %serde_json::to_string(res).unwrap_or_else(|_| "serialization failed".to_string()),
+                        "Tool executed but failed"
+                    );
+                }
+            } else {
+                tracing::info!(
+                    tool = %name,
+                    result = %serde_json::to_string(res).unwrap_or_else(|_| "serialization failed".to_string()),
+                    "Tool executed (no success field)"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                tool = %name,
+                error = %e,
+                "Tool execution failed"
+            );
+        }
     }
+    
+    result
+}
+
+/// Helper to parse normalized coordinates from LLM output.
+/// Supports Qwen3 JSON format {"bbox_2d": [x1, y1, x2, y2]} as well as simple [x, y].
+pub fn parse_coordinates(s: &str) -> Option<(i32, i32)> {
+    // 1. Try to parse as JSON first (Qwen3 style)
+    if let Ok(val) = serde_json::from_str::<Value>(s) {
+        if let Some(bbox) = val.get("bbox_2d").and_then(|v| v.as_array()) {
+            if bbox.len() == 4 {
+                let x1 = bbox[0].as_i64()? as i32;
+                let y1 = bbox[1].as_i64()? as i32;
+                let x2 = bbox[2].as_i64()? as i32;
+                let y2 = bbox[3].as_i64()? as i32;
+                return Some(((x1 + x2) / 2, (y1 + y2) / 2));
+            }
+        }
+    }
+
+    // 2. Fallback to regex for more robust parsing of messy JSON or plain lists
+    let re_bbox = regex::Regex::new(r#""bbox_2d"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]"#).ok()?;
+    if let Some(caps) = re_bbox.captures(s) {
+        let x1 = caps.get(1)?.as_str().parse::<i32>().ok()?;
+        let y1 = caps.get(2)?.as_str().parse::<i32>().ok()?;
+        let x2 = caps.get(3)?.as_str().parse::<i32>().ok()?;
+        let y2 = caps.get(4)?.as_str().parse::<i32>().ok()?;
+        return Some(((x1 + x2) / 2, (y1 + y2) / 2));
+    }
+
+    // 3. Simple [x, y] or (x, y) fallback
+    let re_simple = regex::Regex::new(r"[\[\(]\s*(\d+)\s*,\s*(\d+)\s*[\]\)]").ok()?;
+    if let Some(caps) = re_simple.captures(s) {
+        let x = caps.get(1)?.as_str().parse::<i32>().ok()?;
+        let y = caps.get(2)?.as_str().parse::<i32>().ok()?;
+        return Some((x, y));
+    }
+
+    None
 }

@@ -3,10 +3,11 @@ use dialoguer::{Input, Select};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::process::Command;
-use tracing::{info, debug, warn};
+use tracing::{info, debug, warn, error};
 use tracing_subscriber::EnvFilter;
-use visionctl::{Agent, Config, LlmConfig, VisionCtl};
+use visionctl::{Agent, Config, LlmConfig, VisionCtl, Region};
 
 #[derive(Parser)]
 #[command(name = "visionctl")]
@@ -32,9 +33,27 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run autonomous agent to achieve a goal
+    /// Run autonomous agent to achieve a goal
     Agent {
         /// Goal for the agent to accomplish
         goal: String,
+        /// Limit agent to a specific window (by title keyword)
+        #[arg(long)]
+        window: Option<String>,
+        /// Limit agent to a specific region (x,y,w,h)
+        #[arg(long, value_parser = parse_region)]
+        region: Option<Region>,
+        /// Disable visual input/screenshots (blind mode)
+        #[arg(long)]
+        blind: bool,
+        /// Enable web debugger
+        #[arg(long)]
+        debug: bool,
+    },
+    /// Window management commands
+    Window {
+        #[command(subcommand)]
+        command: WindowCommands,
     },
     /// Capture screenshot to file
     Screenshot {
@@ -64,7 +83,26 @@ enum Commands {
     /// Install KDE desktop file for screenshot permissions
     InstallDesktopFile,
     /// Run interactive configuration wizard
+    /// Run interactive configuration wizard
     Setup,
+}
+
+#[derive(Subcommand)]
+enum WindowCommands {
+    /// List available windows
+    List,
+}
+
+fn parse_region(s: &str) -> Result<Region, String> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 4 {
+        return Err("Region must be x,y,w,h".to_string());
+    }
+    let x = parts[0].parse().map_err(|_| "Invalid x".to_string())?;
+    let y = parts[1].parse().map_err(|_| "Invalid y".to_string())?;
+    let w = parts[2].parse().map_err(|_| "Invalid w".to_string())?;
+    let h = parts[3].parse().map_err(|_| "Invalid h".to_string())?;
+    Ok(Region { x, y, width: w, height: h })
 }
 
 fn init_logging(verbose: u8, quiet: bool) {
@@ -89,12 +127,16 @@ fn init_logging(verbose: u8, quiet: bool) {
         .init();
 }
 
-fn main() -> visionctl::Result<()> {
+#[tokio::main]
+async fn main() -> visionctl::Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose, cli.quiet);
 
     match cli.command {
-        Some(Commands::Agent { goal }) => run_agent(&goal),
+        Some(Commands::Agent { goal, window, region, blind, debug }) => run_agent(&goal, window, region, blind, debug),
+        Some(Commands::Window { command }) => match command {
+            WindowCommands::List => run_list_windows(),
+        },
         Some(Commands::Screenshot { output }) => run_screenshot(&output),
         Some(Commands::FindTemplate {
             template,
@@ -135,47 +177,35 @@ fn get_llm_config() -> visionctl::Result<LlmConfig> {
     let file_config = Config::load();
 
     // Priority: env vars > config file > defaults
-    let backend = std::env::var("VISIONCTL_BACKEND")
-        .unwrap_or_else(|_| file_config.llm.backend.clone());
-    let url = std::env::var("VISIONCTL_URL")
-        .unwrap_or_else(|_| file_config.llm.base_url.clone());
-    let model = std::env::var("VISIONCTL_MODEL")
-        .unwrap_or_else(|_| file_config.llm.model.clone());
-    let api_key = std::env::var("VISIONCTL_API_KEY")
-        .ok()
-        .or_else(|| file_config.llm.api_key.clone());
-
-    let config = match backend.to_lowercase().as_str() {
-        "ollama" => LlmConfig::Ollama { url, model },
-        "vllm" => LlmConfig::Vllm {
-            url,
-            model,
-            api_key,
-        },
-        "openai" => LlmConfig::OpenAI {
-            url,
-            model,
-            api_key: api_key.ok_or_else(|| {
-                visionctl::Error::LlmApiError("API key required for OpenAI (set VISIONCTL_API_KEY or run 'visionctl setup')".to_string())
-            })?,
-        },
-        _ => {
-            return Err(visionctl::Error::LlmApiError(format!(
-                "Unknown backend: {}",
-                backend
-            )));
+    let mut settings = file_config.llm;
+    
+    if let Ok(backend) = std::env::var("VISIONCTL_BACKEND") {
+        settings.backend = backend;
+    }
+    if let Ok(url) = std::env::var("VISIONCTL_URL") {
+        settings.base_url = url;
+    }
+    if let Ok(model) = std::env::var("VISIONCTL_MODEL") {
+        settings.model = model;
+    }
+    if let Ok(api_key) = std::env::var("VISIONCTL_API_KEY") {
+        settings.api_key = Some(api_key);
+    }
+    if let Ok(temp_str) = std::env::var("VISIONCTL_TEMPERATURE") {
+        if let Ok(temp) = temp_str.parse() {
+            settings.temperature = temp;
         }
-    };
+    }
 
-    Ok(config)
+    settings.to_llm_config()
 }
 
 fn run_query(question: &str) -> visionctl::Result<()> {
     let config = get_llm_config()?;
     let ctl = VisionCtl::new(config)?;
 
-    // Capture screenshot with grid and save for debugging
-    let screenshot = ctl.screenshot_with_grid()?;
+    // Capture screenshot with cursor marker and save for debugging
+    let screenshot = ctl.screenshot_with_cursor()?;
     let screenshot_path = "/tmp/visionctl_last_screenshot.png";
     fs::write(screenshot_path, &screenshot)
         .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
@@ -193,14 +223,70 @@ fn run_query(question: &str) -> visionctl::Result<()> {
     Ok(())
 }
 
-fn run_agent(goal: &str) -> visionctl::Result<()> {
+fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Region>, blind_mode: bool, debug_mode: bool) -> visionctl::Result<()> {
     info!(goal = %goal, "Starting agent");
 
-    let config = get_llm_config()?;
+    let main_config = get_llm_config()?;
+    let mut agent = Agent::new(main_config)?
+        .with_max_iterations(20)
+        .with_verbose(true)
+        .with_blind_mode(blind_mode);
 
-    let agent = Agent::new(config)?.with_max_iterations(20).with_verbose(true);
+    if debug_mode {
+        // Start the in-memory state store to track agent events
+        let state_store = Arc::new(visionctl::debugger::StateStore::new());
+        let server_store = state_store.clone();
+        
+        // Spawn the Axum web server in a background task
+        tokio::spawn(async move {
+            let server = visionctl::server::DebugServer::new(server_store);
+            if let Err(e) = server.run(10888).await {
+                error!("Debugger server failed: {}", e);
+            }
+        });
+        
+        // Attach the observer to the agent
+        agent = agent.with_observer(state_store);
+        eprintln!("Debugger running at http://localhost:10888");
+    }
 
-    let result = agent.run(goal)?;
+    // Apply viewport filters
+    if let Some(name) = window_filter {
+         info!("Looking for window matching '{}'", name);
+         if let Some(win) = visionctl::find_window(&name)? {
+             info!(title = %win.title, region = ?win.region, "Found window, restricting viewport");
+             agent.ctl_mut().set_viewport(Some(win.region));
+         } else {
+             error!("Window matching '{}' not found", name);
+             return Err(visionctl::Error::ScreenshotFailed(format!("Window '{}' not found", name)));
+         }
+    } else if let Some(region) = region_filter {
+        info!(region = ?region, "Restricting viewport to region");
+        agent.ctl_mut().set_viewport(Some(region));
+    }
+
+    // Load config to check for pointing delegation
+    let file_config = Config::load();
+    if let Some(pointing_settings) = file_config.pointing {
+        let pointing_config = pointing_settings.to_llm_config()?;
+        agent = agent.with_pointing_config(pointing_config)?;
+        info!("Delegated pointing enabled (from config)");
+    }
+
+    let agent_result = agent.run(goal);
+
+    if debug_mode {
+        if let Err(ref e) = agent_result {
+            error!("Agent failed during execution: {}", e);
+        }
+        eprintln!("\nAgent task finished. Debugger server is still active.");
+        eprintln!("Check the final state at: http://localhost:10888");
+        eprintln!("Press Enter to stop the debugger and exit...");
+        let mut input = String::new();
+        let _ = std::io::stdin().read_line(&mut input);
+    }
+
+    let result = agent_result?;
 
     info!(
         success = result.success,
@@ -313,6 +399,30 @@ fn run_click_template(template: &str, threshold: f32) -> visionctl::Result<()> {
     }
 
     debug!(x = best.x, y = best.y, "Click complete");
+    Ok(())
+}
+
+fn run_list_windows() -> visionctl::Result<()> {
+    let windows = visionctl::list_windows()?;
+    if windows.is_empty() {
+        println!("No windows found.");
+        return Ok(());
+    }
+
+    println!("{:<10} {:<10} {:<10} {:<10} {:<10} {}", "ID", "X", "Y", "Width", "Height", "Title");
+    println!("{}", "-".repeat(80));
+    
+    for w in windows {
+        println!(
+            "{:<10} {:<10} {:<10} {:<10} {:<10} {}",
+            w.id.chars().take(8).collect::<String>(), // Truncate ID
+            w.region.x,
+            w.region.y,
+            w.region.width,
+            w.region.height,
+            w.title
+        );
+    }
     Ok(())
 }
 

@@ -198,8 +198,8 @@ impl InputCtl {
     /// * `Ok(())` if target reached within tolerance
     /// * `Err` if target could not be reached after max attempts
     pub fn move_to_position(&mut self, target_x: i32, target_y: i32, tolerance: i32) -> Result<()> {
-        const MAX_ATTEMPTS: usize = 20;
-        const SERVO_INTERVAL_MS: u64 = 5;
+        const MAX_ATTEMPTS: usize = 200;
+        const SERVO_INTERVAL_MS: u64 = 25;
 
         let (start_x, start_y) = self.cursor_pos();
         debug!(

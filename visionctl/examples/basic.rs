@@ -5,6 +5,7 @@ fn main() -> visionctl::Result<()> {
     let config = LlmConfig::Ollama {
         url: "http://localhost:11434".to_string(),
         model: "llava".to_string(),
+        temperature: 0.0,
     };
 
     // Create VisionCtl instance

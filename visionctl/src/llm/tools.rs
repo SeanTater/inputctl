@@ -16,30 +16,11 @@ pub struct ToolDefinition {
     pub input_schema: Value,
 }
 
-/// Get the plan tool (first iteration only)
-pub fn get_plan_tool() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            name: "plan".to_string(),
-            description: "Create a new plan (required on first turn) or update a plan (required when anything goes wrong)".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "The plan text, including what you see on screen, what you need to change, and how you will do it. Go into detail. Use Markdown."
-                    },
-                },
-                "required": ["text"]
-            })
-        },
-    ]
-}
 
-/// Get action tools (after planning)
+
+/// Get action tools for the agent
 pub fn get_action_tools() -> Vec<ToolDefinition> {
     vec![
-        get_plan_tool().pop().unwrap(),
         ToolDefinition {
             name: "move_to".to_string(),
             description: "Move the cursor to a position using normalized 0-1000 coordinates. (0,0) is top-left, (1000,1000) is bottom-right.".to_string(),
@@ -119,20 +100,7 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
                 "required": ["success", "message"]
             })
         },
-        ToolDefinition {
-            name: "scene_note".to_string(),
-            description: "Record a short summary of what you see on screen for future steps.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "Short, concrete notes about visible UI elements or state"
-                    }
-                },
-                "required": ["text"]
-            })
-        },
+
         ToolDefinition {
             name: "list_icons".to_string(),
             description: "List all available icon names. Use this to discover what icons you can move to with move_to_icon.".to_string(),
@@ -298,9 +266,7 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
 
 /// Get tool definitions for LLM tool-calling (legacy, returns all tools)
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
-    let mut tools = get_plan_tool();
-    tools.extend(get_action_tools());
-    tools
+    get_action_tools()
 }
 
 /// Execute a tool by name with parameters
@@ -363,19 +329,7 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             
             Err(crate::Error::ScreenshotFailed("set_viewport tool not implemented yet".into()))
         }
-        "plan" => {
-            // Plan is informational - just echo back the plan
-            let observations = params.get("observations").and_then(|v| v.as_str()).unwrap_or("");
-            let target_cell = params.get("target_cell").and_then(|v| v.as_str()).unwrap_or("");
-            let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("");
-            Ok(json!({
-                "success": true,
-                "observations": observations,
-                "target_cell": target_cell,
-                "action": action,
-                "message": "Plan recorded. Now execute the action."
-            }))
-        }
+
         "click" => {
             let button_str = params.get("button")
                 .and_then(|v| v.as_str())
@@ -533,14 +487,7 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 "is_task_complete": true
             }))
         }
-        "scene_note" => {
-            let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            Ok(json!({
-                "success": true,
-                "message": "Scene note recorded",
-                "text": text
-            }))
-        }
+
         "target_reached" => {
             let success = params.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
             let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");

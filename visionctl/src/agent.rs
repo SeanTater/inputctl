@@ -1,11 +1,11 @@
 //! Autonomous agent implementation for GUI automation.
 //!
 //! This module contains the [`Agent`] which orchestrates the interaction between
-//! vision models (via [`VisionCtl`]), planning, and tool execution to accomplish
+//! vision models (via [`VisionCtl`]), and tool execution to accomplish
 //! specified goals on a Linux desktop.
 
 use crate::error::Result;
-use crate::llm::{LlmClient, LlmConfig, Message, get_plan_tool, get_action_tools, execute_tool};
+use crate::llm::{LlmClient, LlmConfig, Message, get_action_tools, execute_tool};
 use crate::debugger::{AgentObserver, NoopObserver, Iteration};
 use crate::VisionCtl;
 use crate::primitives::{ScreenshotOptions, capture_screenshot, get_screen_dimensions};
@@ -15,17 +15,6 @@ use std::time::Duration;
 use std::sync::Arc;
 use tracing::{info, debug, warn, error, trace};
 
-const PLAN_PROMPT: &str = r#"You are a GUI automation agent controlling a Linux desktop.
-
-Look at the screenshot (if provided) and create a plan to accomplish the goal. Use 0-1000 normalized coordinates:
-- (0, 0) is the top-left corner
-- (1000, 1000) is the bottom-right corner
-- The red crosshair marks the current cursor position
-
-If no screenshot is visible, use the 'ask_screen' tool to query the screen state.
-
-Analyze the screen and concoct a plan to accomplish the goal."#;
-
 const ACTION_PROMPT: &str = r#"You are a GUI automation agent controlling a Linux desktop.
 
 SCREEN INFORMATION:
@@ -33,24 +22,7 @@ SCREEN INFORMATION:
 - Red crosshair (+) marks current cursor position
 - Coordinates use 0-1000 normalized system: (0,0)=top-left, (1000,1000)=bottom-right
 
-AVAILABLE ACTIONS:
-- plan(text): Create or update a plan for the task. Run this first, and whenever something goes wrong.
-- ask_screen(question): Ask a question about the screen content. Useful for verifying outcomes.
-- point_at(description): Find a UI element by text description and move to it.
-- move_to(x, y): Move cursor to position (0-1000 normalized coordinates)
-- click(button): Click at current cursor position
-- double_click(button): Double click at current cursor position
-- scroll(dx, dy): Scroll the mouse wheel. dy > 0 scrolls up, dy < 0 scrolls down.
-- mouse_down(button): Press and hold mouse button
-- mouse_up(button): Release mouse button
-- type_text(text): Type text at focus
-- key_press(key): Press special keys (enter, escape, tab, etc.)
-- key_down(key): Press and hold a key
-- key_up(key): Release a key
-- move_to_icon(name, threshold?): Find an icon and move the cursor to it. Not all icons are available.
-- list_icons(): See available icons
-- task_complete(success, message): Signal FINAL task is done (not intermediate)
-- stuck(): Indicate you are stuck and need help
+Using the provided tools, verify the screen state and perform actions to accomplish the user's goal.
 
 MULTIPLE TOOL CALLS:
 - You can and SHOULD call multiple tools in a single turn if they make sense together.
@@ -62,12 +34,11 @@ PITFALLS:
 - Do not repeat the same action multiple times in a row
 - Always verify that an action succeeded using ask_screen() or by checking the screenshot
 - Avoid confirmation bias when verifying (e.g. ask "What is the focused window?" not "Is the window focused?")
-- If something unexpected happens, create a new plan before taking further actions
 Use the tools to accomplish the goal step by step."#;
 
 /// Agent configuration
 pub struct AgentConfig {
-    pub max_iterations: usize,
+    pub max_iterations: Option<usize>,
     pub verbose: bool,
     pub save_screenshots: bool,
     pub blind_mode: bool,
@@ -76,7 +47,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 20,
+            max_iterations: None,
             verbose: true,
             save_screenshots: true,
             blind_mode: false,
@@ -115,8 +86,7 @@ impl Agent {
         })
     }
 
-    /// Set maximum iterations
-    pub fn with_max_iterations(mut self, max: usize) -> Self {
+    pub fn with_max_iterations(mut self, max: Option<usize>) -> Self {
         self.config.max_iterations = max;
         self
     }
@@ -178,26 +148,15 @@ impl Agent {
     /// Run the agent to accomplish a goal
     pub fn run(&self, goal: &str) -> Result<AgentResult> {
         let mut actions_taken = Vec::new();
-        let mut plan_target: Option<String> = None;
-        let mut scene_notes: Option<String> = None;
-        let mut require_replan = false;
 
-        // Phase 1: Planning
-        info!("Phase 1: Planning");
+        info!("Starting agent");
         debug!(goal = %goal, "Starting agent");
         self.observer.on_run_start(goal);
 
-        let screenshot = self.screenshot_with_cursor()?;
-        if self.config.save_screenshots {
-            let path = "/tmp/visionctl_agent_plan.png";
-            let _ = fs::write(path, &screenshot);
-            debug!(path = %path, "Saved planning screenshot");
-        }
-
-        let plan_messages = vec![
+        let mut messages: Vec<Message> = vec![
             Message {
                 role: "system".to_string(),
-                content: Some(PLAN_PROMPT.to_string()),
+                content: Some(ACTION_PROMPT.to_string()),
                 images: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -215,61 +174,15 @@ impl Agent {
             },
         ];
 
-        let plan_tools = get_plan_tool();
-        debug!("Querying LLM for plan");
-        
-        let plan_screenshot = if self.config.blind_mode {
-            None
-        } else {
-            Some(screenshot.as_slice())
-        };
-
-        self.observer.on_llm_query(&plan_messages, &plan_tools);
-        let plan_response = self.llm_client.chat_with_tools(&plan_messages, &plan_tools, plan_screenshot)?;
-
-        if let Some(tool_calls) = &plan_response.tool_calls {
-            if let Some(call) = tool_calls.first() {
-                if call.function.name == "plan" {
-                    let text = call.function.arguments.get("text")
-                        .and_then(|v| v.as_str()).unwrap_or("");
-
-                    info!(text = %text, "Plan created");
-
-                    plan_target = Some(text.to_string());
-                    actions_taken.push(format!("plan(text={})", text));
-                }
-            }
-        } else if let Some(content) = &plan_response.content {
-            warn!(content = %content, "LLM responded without tool call");
-        }
-
-        // Phase 2: Execution
-        info!("Phase 2: Execution");
-        let mut messages: Vec<Message> = vec![
-            Message {
-                role: "system".to_string(),
-                content: Some(ACTION_PROMPT.to_string()),
-                images: None,
-                tool_calls: None,
-                tool_call_id: None,
-            },
-            Message {
-                role: "user".to_string(),
-                content: Some(format!(
-                    "Goal: {}\nPlan target: {}\nStatus: {}",
-                    goal,
-                    plan_target.as_deref().unwrap_or("unknown"),
-                    self.cursor_status()?
-                )),
-                images: None,
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ];
-
         let action_tools = get_action_tools();
 
-        for iteration in 0..self.config.max_iterations {
+        let mut iteration = 0;
+        loop {
+            if let Some(max) = self.config.max_iterations {
+                if iteration >= max {
+                    break;
+                }
+            }
             self.observer.wait_if_paused();
 
             let injected = self.observer.get_injected_messages();
@@ -300,7 +213,7 @@ impl Agent {
 
             if self.config.save_screenshots {
                 let path = format!("/tmp/visionctl_agent_{}.png", iteration);
-                let _ = fs::write(&path, &screenshot);
+                let _ = fs::write(&path, &model_screenshot);
                 trace!(path = %path, "Saved iteration screenshot");
             }
 
@@ -322,19 +235,10 @@ impl Agent {
             // (OpenAI API requires assistant after tool, not user)
             let last_role = messages.last().map(|m| m.role.as_str());
             if last_role != Some("tool") {
-                let status_message = if require_replan {
-                    format!(
-                        "Status: {}\nScene notes: {}\nPrevious tool failed. Replan with plan().",
-                        self.cursor_status()?,
-                        scene_notes.as_deref().unwrap_or("none")
-                    )
-                } else {
-                    format!(
-                        "Status: {}\nScene notes: {}",
-                        self.cursor_status()?,
-                        scene_notes.as_deref().unwrap_or("none")
-                    )
-                };
+                let status_message = format!(
+                    "Status: {}",
+                    self.cursor_status()?,
+                );
                 messages.push(Message {
                     role: "user".to_string(),
                     content: Some(status_message),
@@ -344,11 +248,7 @@ impl Agent {
                 });
             }
 
-            let tools = if require_replan {
-                get_plan_tool()
-            } else {
-                action_tools.clone()
-            };
+            let tools = action_tools.clone();
 
             let iter_screenshot = if self.config.blind_mode {
                 None
@@ -393,25 +293,7 @@ impl Agent {
                     info!(tool = %tool_name, args = %tool_args, "Executing tool");
                     self.observer.on_tool_start(tool_name, tool_args);
 
-                    if require_replan && tool_name != "plan" {
-                        let result = json!({
-                            "success": false,
-                            "error": "Previous iteration failed. Call plan() before any other action."
-                        });
 
-                        actions_taken.push(format!("{}({})", tool_name, tool_args));
-
-                        messages.push(Message {
-                            role: "tool".to_string(),
-                            content: Some(result.to_string()),
-                            images: None,
-                            tool_calls: None,
-                            tool_call_id: call.id.clone(),
-                        });
-
-                        stop_execution = true;
-                        continue;
-                    }
 
                     // Check for task_complete
                     if tool_name == "task_complete" {
@@ -446,61 +328,6 @@ impl Agent {
                         });
                     }
 
-                    if tool_name == "plan" {
-                        let observations = tool_args.get("observations")
-                            .and_then(|v| v.as_str()).unwrap_or("");
-                        let target = tool_args.get("target_cell")
-                            .and_then(|v| v.as_str()).unwrap_or("");
-                        let action = tool_args.get("action")
-                            .and_then(|v| v.as_str()).unwrap_or("");
-
-                        actions_taken.push(format!("plan(target={})", target));
-                        require_replan = false;
-
-                        let result = json!({
-                            "success": true,
-                            "observations": observations,
-                            "target_cell": target,
-                            "action": action,
-                            "message": "Plan recorded. Now execute the action."
-                        });
-
-                        messages.push(Message {
-                            role: "tool".to_string(),
-                            content: Some(result.to_string()),
-                            images: None,
-                            tool_calls: None,
-                            tool_call_id: call.id.clone(),
-                        });
-
-                        // Continue to next tool if any (though usually plan is followed by nothing in same turn)
-                        continue;
-                    }
-
-                    if tool_name == "scene_note" {
-                        let text = tool_args.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
-                        if !text.is_empty() {
-                            scene_notes = Some(text.to_string());
-                        }
-
-                        let result = json!({
-                            "success": true,
-                            "message": "Scene note recorded",
-                            "text": text
-                        });
-
-                        actions_taken.push(format!("{}({})", tool_name, tool_args));
-
-                        messages.push(Message {
-                            role: "tool".to_string(),
-                            content: Some(result.to_string()),
-                            images: None,
-                            tool_calls: None,
-                            tool_call_id: call.id.clone(),
-                        });
-
-                        continue;
-                    }
 
                     // Execute the tool
                     let (result, tool_failed) = match execute_tool(&self.ctl, tool_name, tool_args.clone()) {
@@ -531,7 +358,6 @@ impl Agent {
                     actions_taken.push(format!("{}({})", tool_name, tool_args));
                     
                     if tool_failed {
-                        require_replan = true;
                         stop_execution = true;
                     }
 
@@ -572,13 +398,14 @@ impl Agent {
                     tool_call_id: None,
                 });
             }
+            iteration += 1;
         }
 
-        warn!(max = self.config.max_iterations, "Max iterations reached");
+        warn!(max = ?self.config.max_iterations, "Iteration limit reached");
         Ok(AgentResult {
             success: false,
-            message: "Max iterations reached without completing the task".to_string(),
-            iterations: self.config.max_iterations,
+            message: format!("Iteration limit {:?} reached without completing the task", self.config.max_iterations),
+            iterations: iteration,
             actions_taken,
         })
     }

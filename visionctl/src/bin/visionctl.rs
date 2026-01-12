@@ -49,6 +49,9 @@ enum Commands {
         /// Enable web debugger
         #[arg(long)]
         debug: bool,
+        /// Maximum iterations (0 = unlimited)
+        #[arg(long, default_value = "0")]
+        max_iterations: usize,
     },
     /// Window management commands
     Window {
@@ -133,7 +136,7 @@ async fn main() -> visionctl::Result<()> {
     init_logging(cli.verbose, cli.quiet);
 
     match cli.command {
-        Some(Commands::Agent { goal, window, region, blind, debug }) => run_agent(&goal, window, region, blind, debug),
+        Some(Commands::Agent { goal, window, region, blind, debug, max_iterations }) => run_agent(&goal, window, region, blind, debug, max_iterations),
         Some(Commands::Window { command }) => match command {
             WindowCommands::List => run_list_windows(),
         },
@@ -223,12 +226,13 @@ fn run_query(question: &str) -> visionctl::Result<()> {
     Ok(())
 }
 
-fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Region>, blind_mode: bool, debug_mode: bool) -> visionctl::Result<()> {
+fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Region>, blind_mode: bool, debug_mode: bool, max_iterations: usize) -> visionctl::Result<()> {
     info!(goal = %goal, "Starting agent");
 
     let main_config = get_llm_config()?;
+    let iter_limit = if max_iterations == 0 { None } else { Some(max_iterations) };
     let mut agent = Agent::new(main_config)?
-        .with_max_iterations(20)
+        .with_max_iterations(iter_limit)
         .with_verbose(true)
         .with_blind_mode(blind_mode);
 

@@ -6,7 +6,7 @@
 //!
 //! # Core Components
 //! - [`VisionCtl`]: The main controller for screenshots, coordinate conversion, and LLM interaction.
-//! - [`agent`]: An autonomous agent that can create plans and execute tools to achieve goals.
+//! - [`agent`]: An autonomous agent that can execute tools to achieve goals on a desktop.
 //! - [`debugger`]: Tools for tracking and visualizing the agent's internal state.
 //! - [`server`]: An embedded web server to expose debugging information.
 //!

@@ -39,12 +39,24 @@ AVAILABLE ACTIONS:
 - point_at(description): Find a UI element by text description and move to it.
 - move_to(x, y): Move cursor to position (0-1000 normalized coordinates)
 - click(button): Click at current cursor position
+- double_click(button): Double click at current cursor position
+- scroll(dx, dy): Scroll the mouse wheel. dy > 0 scrolls up, dy < 0 scrolls down.
+- mouse_down(button): Press and hold mouse button
+- mouse_up(button): Release mouse button
 - type_text(text): Type text at focus
 - key_press(key): Press special keys (enter, escape, tab, etc.)
+- key_down(key): Press and hold a key
+- key_up(key): Release a key
 - move_to_icon(name, threshold?): Find an icon and move the cursor to it. Not all icons are available.
 - list_icons(): See available icons
 - task_complete(success, message): Signal FINAL task is done (not intermediate)
 - stuck(): Indicate you are stuck and need help
+
+MULTIPLE TOOL CALLS:
+- You can and SHOULD call multiple tools in a single turn if they make sense together.
+- For example: move_to(x, y) + click(left) is common.
+- Or: move_to(x, y) + mouse_down(left) + move_to(x2, y2) + mouse_up(left) for drag-and-drop.
+- Tools are executed in the order you provide them.
 
 PITFALLS:
 - Do not repeat the same action multiple times in a row
@@ -348,9 +360,33 @@ impl Agent {
             let response = self.llm_client.chat_with_tools(&messages, &tools, iter_screenshot)?;
 
             if let Some(tool_calls) = &response.tool_calls {
-                // Process only the FIRST tool call - don't batch execute
-                // This ensures we see errors before executing subsequent tools
-                if let Some(call) = tool_calls.first() {
+                // Add the assistant's message with tool calls to history FIRST
+                messages.push(Message {
+                    role: "assistant".to_string(),
+                    content: response.content.clone(),
+                    images: None,
+                    tool_calls: Some(tool_calls.clone()),
+                    tool_call_id: None,
+                });
+
+                let mut stop_execution = false;
+
+                for call in tool_calls {
+                    if stop_execution {
+                        // If a previous tool failed, we must signal that we're skipping this one
+                        messages.push(Message {
+                            role: "tool".to_string(),
+                            content: Some(json!({
+                                "success": false,
+                                "error": "Skipped due to previously failed tool in sequence."
+                            }).to_string()),
+                            images: None,
+                            tool_calls: None,
+                            tool_call_id: call.id.clone(),
+                        });
+                        continue;
+                    }
+
                     let tool_name = &call.function.name;
                     let tool_args = &call.function.arguments;
 
@@ -360,18 +396,10 @@ impl Agent {
                     if require_replan && tool_name != "plan" {
                         let result = json!({
                             "success": false,
-                            "error": "Previous tool failed. Call plan() before any other action."
+                            "error": "Previous iteration failed. Call plan() before any other action."
                         });
 
                         actions_taken.push(format!("{}({})", tool_name, tool_args));
-
-                        messages.push(Message {
-                            role: "assistant".to_string(),
-                            content: response.content.clone(),
-                            images: None,
-                            tool_calls: Some(vec![call.clone()]),
-                            tool_call_id: None,
-                        });
 
                         messages.push(Message {
                             role: "tool".to_string(),
@@ -381,7 +409,7 @@ impl Agent {
                             tool_call_id: call.id.clone(),
                         });
 
-                        std::thread::sleep(Duration::from_millis(250));
+                        stop_execution = true;
                         continue;
                     }
 
@@ -426,7 +454,6 @@ impl Agent {
                         let action = tool_args.get("action")
                             .and_then(|v| v.as_str()).unwrap_or("");
 
-                        // plan_target = Some(target.to_string());
                         actions_taken.push(format!("plan(target={})", target));
                         require_replan = false;
 
@@ -439,14 +466,6 @@ impl Agent {
                         });
 
                         messages.push(Message {
-                            role: "assistant".to_string(),
-                            content: response.content.clone(),
-                            images: None,
-                            tool_calls: Some(vec![call.clone()]),
-                            tool_call_id: None,
-                        });
-
-                        messages.push(Message {
                             role: "tool".to_string(),
                             content: Some(result.to_string()),
                             images: None,
@@ -454,9 +473,7 @@ impl Agent {
                             tool_call_id: call.id.clone(),
                         });
 
-                        self.observer.on_llm_query(&messages, &tools);
-
-                        std::thread::sleep(Duration::from_millis(250));
+                        // Continue to next tool if any (though usually plan is followed by nothing in same turn)
                         continue;
                     }
 
@@ -475,14 +492,6 @@ impl Agent {
                         actions_taken.push(format!("{}({})", tool_name, tool_args));
 
                         messages.push(Message {
-                            role: "assistant".to_string(),
-                            content: response.content.clone(),
-                            images: None,
-                            tool_calls: Some(vec![call.clone()]),
-                            tool_call_id: None,
-                        });
-
-                        messages.push(Message {
                             role: "tool".to_string(),
                             content: Some(result.to_string()),
                             images: None,
@@ -490,9 +499,6 @@ impl Agent {
                             tool_call_id: call.id.clone(),
                         });
 
-                        self.observer.on_llm_query(&messages, &tools);
-
-                        std::thread::sleep(Duration::from_millis(250));
                         continue;
                     }
 
@@ -523,16 +529,11 @@ impl Agent {
                     self.observer.on_tool_end(tool_name, &result);
 
                     actions_taken.push(format!("{}({})", tool_name, tool_args));
-                    require_replan = tool_failed;
-
-                    // Add to message history
-                    messages.push(Message {
-                        role: "assistant".to_string(),
-                        content: response.content.clone(),
-                        images: None,
-                        tool_calls: Some(vec![call.clone()]),
-                        tool_call_id: None,
-                    });
+                    
+                    if tool_failed {
+                        require_replan = true;
+                        stop_execution = true;
+                    }
 
                     // Include tool_call_id to link response to the original call
                     messages.push(Message {
@@ -543,21 +544,14 @@ impl Agent {
                         tool_call_id: call.id.clone(),
                     });
 
-                    self.observer.on_llm_query(&messages, &tools);
-
-                    // If there were multiple tool calls but we only executed one,
-                    // log that we're skipping the rest
-                    if tool_calls.len() > 1 {
-                        let skipped: Vec<_> = tool_calls.iter().skip(1).map(|c| &c.function.name).collect();
-                        if tool_failed {
-                            warn!(skipped = ?skipped, "Skipping remaining tools due to failure");
-                        } else {
-                            debug!(skipped = ?skipped, "Processing one tool at a time");
-                        }
+                    // Small delay between tools in a sequence to allow UI to catch up
+                    if !stop_execution {
+                        std::thread::sleep(Duration::from_millis(150));
                     }
-
-                    std::thread::sleep(Duration::from_millis(500));
                 }
+
+                self.observer.on_llm_query(&messages, &tools);
+                std::thread::sleep(Duration::from_millis(250));
             } else if let Some(content) = &response.content {
                 // LLM responded with text instead of a tool call - prompt it to use tools
                 debug!(content = %content, "LLM text response (no tool call)");

@@ -8,6 +8,10 @@ pub mod input;
 
 pub use input::{
     MouseButton,
-    click, move_to_pixel,
+    click, double_click,
+    mouse_down, mouse_up,
+    scroll,
+    move_to_pixel,
     type_text, key_press,
+    key_down, key_up,
 };

@@ -201,6 +201,97 @@ pub fn get_action_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["question"]
             })
+        },
+        ToolDefinition {
+            name: "scroll".to_string(),
+            description: "Scroll the mouse wheel. Positive dy scrolls up, negative dy scrolls down.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dx": {
+                        "type": "integer",
+                        "description": "Horizontal scroll amount (0 for vertical only)"
+                    },
+                    "dy": {
+                        "type": "integer",
+                        "description": "Vertical scroll amount (positive=up, negative=down)"
+                    }
+                },
+                "required": ["dx", "dy"]
+            })
+        },
+        ToolDefinition {
+            name: "double_click".to_string(),
+            description: "Double click at the current cursor position.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": "Mouse button to double click",
+                        "default": "left"
+                    }
+                }
+            })
+        },
+        ToolDefinition {
+            name: "mouse_down".to_string(),
+            description: "Press and hold a mouse button at the current position. Use for drag-and-drop.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": "Mouse button to press down",
+                        "default": "left"
+                    }
+                }
+            })
+        },
+        ToolDefinition {
+            name: "mouse_up".to_string(),
+            description: "Release a previously pressed mouse button.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right", "middle"],
+                        "description": "Mouse button to release",
+                        "default": "left"
+                    }
+                }
+            })
+        },
+        ToolDefinition {
+            name: "key_down".to_string(),
+            description: "Press and hold a key (e.g., 'ctrl', 'shift', 'a').".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "The key to hold down"
+                    }
+                },
+                "required": ["key"]
+            })
+        },
+        ToolDefinition {
+            name: "key_up".to_string(),
+            description: "Release a previously pressed key.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "The key to release"
+                    }
+                },
+                "required": ["key"]
+            })
         }
     ]
 }
@@ -319,10 +410,93 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'key' parameter".into()))?;
 
-            ctl.key_press(key)?;
+            crate::actions::key_press(key)?;
             Ok(json!({
                 "success": true,
                 "message": format!("Pressed key '{}'", key)
+            }))
+        }
+        "double_click" => {
+            let button_str = params.get("button")
+                .and_then(|v| v.as_str())
+                .unwrap_or("left");
+
+            let button = match button_str {
+                "right" => crate::MouseButton::Right,
+                "middle" => crate::MouseButton::Middle,
+                _ => crate::MouseButton::Left,
+            };
+
+            crate::actions::double_click(button)?;
+            Ok(json!({
+                "success": true,
+                "message": format!("Double clicked {} button at current position", button_str)
+            }))
+        }
+        "mouse_down" => {
+            let button_str = params.get("button")
+                .and_then(|v| v.as_str())
+                .unwrap_or("left");
+
+            let button = match button_str {
+                "right" => crate::MouseButton::Right,
+                "middle" => crate::MouseButton::Middle,
+                _ => crate::MouseButton::Left,
+            };
+
+            crate::actions::mouse_down(button)?;
+            Ok(json!({
+                "success": true,
+                "message": format!("Mouse button {} pressed down", button_str)
+            }))
+        }
+        "mouse_up" => {
+            let button_str = params.get("button")
+                .and_then(|v| v.as_str())
+                .unwrap_or("left");
+
+            let button = match button_str {
+                "right" => crate::MouseButton::Right,
+                "middle" => crate::MouseButton::Middle,
+                _ => crate::MouseButton::Left,
+            };
+
+            crate::actions::mouse_up(button)?;
+            Ok(json!({
+                "success": true,
+                "message": format!("Mouse button {} released", button_str)
+            }))
+        }
+        "scroll" => {
+            let dx = params.get("dx").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let dy = params.get("dy").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+            crate::actions::scroll(dx, dy)?;
+            Ok(json!({
+                "success": true,
+                "message": format!("Scrolled dx={}, dy={}", dx, dy)
+            }))
+        }
+        "key_down" => {
+            let key = params.get("key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'key' parameter".into()))?;
+
+            crate::actions::key_down(key)?;
+            Ok(json!({
+                "success": true,
+                "message": format!("Key '{}' pressed down", key)
+            }))
+        }
+        "key_up" => {
+            let key = params.get("key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'key' parameter".into()))?;
+
+            crate::actions::key_up(key)?;
+            Ok(json!({
+                "success": true,
+                "message": format!("Key '{}' released", key)
             }))
         }
         "find_cursor" => {

@@ -37,6 +37,48 @@ pub fn click(button: MouseButton) -> Result<()> {
         .map_err(|e| Error::ScreenshotFailed(format!("Mouse click failed: {}", e)))
 }
 
+/// Double click at current cursor position
+pub fn double_click(button: MouseButton) -> Result<()> {
+    let ctl = get_input_ctl()?;
+    let mut ctl = ctl.lock().unwrap();
+
+    ctl.click(button)
+        .map_err(|e| Error::ScreenshotFailed(format!("First click of double click failed: {}", e)))?;
+    
+    // Human-scale non-configurable delay
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    ctl.click(button)
+        .map_err(|e| Error::ScreenshotFailed(format!("Second click of double click failed: {}", e)))
+}
+
+/// Press and hold mouse button
+pub fn mouse_down(button: MouseButton) -> Result<()> {
+    let ctl = get_input_ctl()?;
+    let mut ctl = ctl.lock().unwrap();
+
+    ctl.mouse_down(button)
+        .map_err(|e| Error::ScreenshotFailed(format!("Mouse down failed: {}", e)))
+}
+
+/// Release mouse button
+pub fn mouse_up(button: MouseButton) -> Result<()> {
+    let ctl = get_input_ctl()?;
+    let mut ctl = ctl.lock().unwrap();
+
+    ctl.mouse_up(button)
+        .map_err(|e| Error::ScreenshotFailed(format!("Mouse up failed: {}", e)))
+}
+
+/// Scroll mouse wheel
+pub fn scroll(_dx: i32, dy: i32) -> Result<()> {
+    let ctl = get_input_ctl()?;
+    let mut ctl = ctl.lock().unwrap();
+
+    ctl.scroll(dy)
+        .map_err(|e| Error::ScreenshotFailed(format!("Scroll failed: {}", e)))
+}
+
 /// Move mouse to pixel coordinates
 pub fn move_to_pixel(x: i32, y: i32, smooth: bool) -> Result<()> {
     let ctl = get_input_ctl()?;
@@ -88,6 +130,30 @@ pub fn key_press(key: &str) -> Result<()> {
     // Press and release the key
     ctl.key_click(evdev_key)
         .map_err(|e| Error::ScreenshotFailed(format!("Key press failed: {}", e)))
+}
+
+/// Press and hold a key by name
+pub fn key_down(key: &str) -> Result<()> {
+    let ctl = get_input_ctl()?;
+    let mut ctl = ctl.lock().unwrap();
+
+    let evdev_key = inputctl::parse_key_name(key)
+        .map_err(|e| Error::ScreenshotFailed(format!("Invalid key name '{}': {}", key, e)))?;
+
+    ctl.key_down(evdev_key)
+        .map_err(|e| Error::ScreenshotFailed(format!("Key down failed: {}", e)))
+}
+
+/// Release a key by name
+pub fn key_up(key: &str) -> Result<()> {
+    let ctl = get_input_ctl()?;
+    let mut ctl = ctl.lock().unwrap();
+
+    let evdev_key = inputctl::parse_key_name(key)
+        .map_err(|e| Error::ScreenshotFailed(format!("Invalid key name '{}': {}", key, e)))?;
+
+    ctl.key_up(evdev_key)
+        .map_err(|e| Error::ScreenshotFailed(format!("Key up failed: {}", e)))
 }
 
 #[cfg(test)]

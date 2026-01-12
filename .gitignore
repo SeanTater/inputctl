@@ -9,3 +9,9 @@ __pycache__/
 *.egg-info/
 dist/
 .python-version
+
+# IDEs and temporary files
+.vscode/
+scratch/
+*.log
+COMMIT_MESSAGE.txt

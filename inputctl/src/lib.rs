@@ -230,8 +230,8 @@ impl InputCtl {
             // Move toward target
             // Use full distance for small corrections, partial for large moves
             let (move_x, move_y) = if dx.abs() > 100 || dy.abs() > 100 {
-                // Large distance: move half to avoid overshoot
-                (dx / 2, dy / 2)
+                // Large distance: move no more than 50 pixels in 25 ms
+                (50, 50)
             } else if dx.abs() > 20 || dy.abs() > 20 {
                 // Medium distance: move 75%
                 (dx * 3 / 4, dy * 3 / 4)
@@ -325,12 +325,14 @@ impl InputCtl {
     /// Press and release a key
     pub fn key_click(&mut self, key: Key) -> Result<()> {
         self.key_down(key)?;
+        thread::sleep(Duration::from_millis(50));
         self.key_up(key)
     }
 
     /// Click a mouse button (press and release)
     pub fn click(&mut self, button: MouseButton) -> Result<()> {
         self.mouse_down(button)?;
+        thread::sleep(Duration::from_millis(50));
         self.mouse_up(button)
     }
 

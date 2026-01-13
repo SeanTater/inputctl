@@ -583,8 +583,6 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }
 
             // 1. Query the pointing model
-            // For this sketch, we reuse the existing LLM client but could easily 
-            // swap it for a dedicated 'tiny' model client.
             let prompt = format!(
                 "You are a pointing specialist. Find the following element on screen: {}. \
                 Return your response in JSON format: {{\"bbox_2d\": [x1, y1, x2, y2], \"label\": \"object_label\"}}. \
@@ -592,7 +590,7 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 Only return the JSON object, no other text.", 
                 description
             );
-            
+
             let response = ctl.ask_pointing(&prompt)?;
             
             // 3. Parse coordinates (simple greedy [x, y] extraction)

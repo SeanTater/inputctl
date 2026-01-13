@@ -46,6 +46,9 @@ enum Commands {
         /// Disable visual input/screenshots (blind mode)
         #[arg(long)]
         blind: bool,
+        /// Disable vision tools (keep screenshots but remove point_at, ask_screen, etc.)
+        #[arg(long)]
+        no_vision_tools: bool,
         /// Enable web debugger
         #[arg(long)]
         debug: bool,
@@ -136,7 +139,7 @@ async fn main() -> visionctl::Result<()> {
     init_logging(cli.verbose, cli.quiet);
 
     match cli.command {
-        Some(Commands::Agent { goal, window, region, blind, debug, max_iterations }) => run_agent(&goal, window, region, blind, debug, max_iterations),
+        Some(Commands::Agent { goal, window, region, blind, no_vision_tools, debug, max_iterations }) => run_agent(&goal, window, region, blind, no_vision_tools, debug, max_iterations),
         Some(Commands::Window { command }) => match command {
             WindowCommands::List => run_list_windows(),
         },
@@ -226,7 +229,7 @@ fn run_query(question: &str) -> visionctl::Result<()> {
     Ok(())
 }
 
-fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Region>, blind_mode: bool, debug_mode: bool, max_iterations: usize) -> visionctl::Result<()> {
+fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Region>, blind_mode: bool, no_vision_tools: bool, debug_mode: bool, max_iterations: usize) -> visionctl::Result<()> {
     info!(goal = %goal, "Starting agent");
 
     let main_config = get_llm_config()?;
@@ -234,7 +237,8 @@ fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Re
     let mut agent = Agent::new(main_config)?
         .with_max_iterations(iter_limit)
         .with_verbose(true)
-        .with_blind_mode(blind_mode);
+        .with_blind_mode(blind_mode)
+        .with_no_vision_tools(no_vision_tools);
 
     if debug_mode {
         // Start the in-memory state store to track agent events

@@ -44,6 +44,8 @@ pub struct LlmSettings {
     pub api_key: Option<String>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
 }
 
 fn default_temperature() -> f32 {
@@ -69,12 +71,14 @@ impl LlmSettings {
                 url: self.base_url.clone(),
                 model: self.model.clone(),
                 temperature: self.temperature,
+                repetition_penalty: self.repetition_penalty,
             }),
             "vllm" => Ok(LlmConfig::Vllm {
                 url: self.base_url.clone(),
                 model: self.model.clone(),
                 api_key: self.api_key.clone(),
                 temperature: self.temperature,
+                repetition_penalty: self.repetition_penalty,
             }),
             "openai" => {
                 let api_key = self.api_key.clone().ok_or_else(|| {
@@ -85,6 +89,7 @@ impl LlmSettings {
                     model: self.model.clone(),
                     api_key,
                     temperature: self.temperature,
+                    repetition_penalty: self.repetition_penalty,
                 })
             }
             _ => Err(crate::Error::LlmApiError(format!(
@@ -103,6 +108,7 @@ impl Default for LlmSettings {
             model: default_model(),
             api_key: None,
             temperature: default_temperature(),
+            repetition_penalty: None,
         }
     }
 }

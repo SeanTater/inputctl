@@ -42,6 +42,7 @@ pub struct AgentConfig {
     pub verbose: bool,
     pub save_screenshots: bool,
     pub blind_mode: bool,
+    pub no_vision_tools: bool,
 }
 
 impl Default for AgentConfig {
@@ -51,6 +52,7 @@ impl Default for AgentConfig {
             verbose: true,
             save_screenshots: true,
             blind_mode: false,
+            no_vision_tools: false,
         }
     }
 }
@@ -105,6 +107,12 @@ impl Agent {
     /// Set blind mode (disable screenshots in main loop)
     pub fn with_blind_mode(mut self, blind: bool) -> Self {
         self.config.blind_mode = blind;
+        self
+    }
+
+    /// Set no vision tools mode (keep screenshots but disable vision tools)
+    pub fn with_no_vision_tools(mut self, no_vision: bool) -> Self {
+        self.config.no_vision_tools = no_vision;
         self
     }
 
@@ -174,7 +182,19 @@ impl Agent {
             },
         ];
 
-        let action_tools = get_action_tools();
+        let mut action_tools = get_action_tools();
+        if self.config.no_vision_tools {
+            // Filter out tools that rely on explicit computer vision queries 
+            // (the model still sees the screenshot but can't use these helpers)
+            action_tools.retain(|t| ![
+                "point_at", 
+                "move_to_icon", 
+                "find_template", 
+                "list_icons", 
+                "list_templates",
+                "ask_screen"
+            ].contains(&t.name.as_str()));
+        }
 
         let mut iteration = 0;
         loop {
@@ -257,7 +277,7 @@ impl Agent {
             };
 
             self.observer.on_llm_query(&messages, &tools);
-            let response = self.llm_client.chat_with_tools(&messages, &tools, iter_screenshot)?;
+            let response = self.llm_client.chat_with_tools(&messages, &tools, iter_screenshot, Some("required".to_string()))?;
 
             if let Some(tool_calls) = &response.tool_calls {
                 // Add the assistant's message with tool calls to history FIRST

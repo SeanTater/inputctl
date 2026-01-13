@@ -13,9 +13,9 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub enum LlmConfig {
-    Ollama { url: String, model: String, temperature: f32 },
-    Vllm { url: String, model: String, api_key: Option<String>, temperature: f32 },
-    OpenAI { url: String, model: String, api_key: String, temperature: f32 },
+    Ollama { url: String, model: String, temperature: f32, repetition_penalty: Option<f32> },
+    Vllm { url: String, model: String, api_key: Option<String>, temperature: f32, repetition_penalty: Option<f32> },
+    OpenAI { url: String, model: String, api_key: String, temperature: f32, repetition_penalty: Option<f32> },
 }
 
 /// Message in a conversation
@@ -79,14 +79,14 @@ impl LlmClient {
         let image_base64 = general_purpose::STANDARD.encode(image_bytes);
 
         match &self.config {
-            LlmConfig::Ollama { url, model, temperature } => {
-                self.query_ollama(url, model, &image_base64, prompt, *temperature)
+            LlmConfig::Ollama { url, model, temperature, repetition_penalty } => {
+                self.query_ollama(url, model, &image_base64, prompt, *temperature, *repetition_penalty)
             }
-            LlmConfig::Vllm { url, model, api_key, temperature } => {
-                self.query_openai_compatible(url, model, api_key.as_deref(), &image_base64, prompt, *temperature)
+            LlmConfig::Vllm { url, model, api_key, temperature, repetition_penalty } => {
+                self.query_openai_compatible(url, model, api_key.as_deref(), &image_base64, prompt, *temperature, *repetition_penalty)
             }
-            LlmConfig::OpenAI { url, model, api_key, temperature } => {
-                self.query_openai_compatible(url, model, Some(api_key.as_str()), &image_base64, prompt, *temperature)
+            LlmConfig::OpenAI { url, model, api_key, temperature, repetition_penalty } => {
+                self.query_openai_compatible(url, model, Some(api_key.as_str()), &image_base64, prompt, *temperature, *repetition_penalty)
             }
         }
     }
@@ -97,16 +97,17 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDefinition],
         image: Option<&[u8]>,
+        tool_choice: Option<String>,
     ) -> Result<ChatResponse> {
         match &self.config {
-            LlmConfig::Ollama { url, model, temperature } => {
-                self.chat_ollama_with_tools(url, model, messages, tools, image, *temperature)
+            LlmConfig::Ollama { url, model, temperature, repetition_penalty } => {
+                self.chat_ollama_with_tools(url, model, messages, tools, image, *temperature, *repetition_penalty)
             }
-            LlmConfig::Vllm { url, model, api_key, temperature } => {
-                self.chat_openai_compatible_with_tools(url, model, api_key.as_deref(), messages, tools, image, *temperature)
+            LlmConfig::Vllm { url, model, api_key, temperature, repetition_penalty } => {
+                self.chat_openai_compatible_with_tools(url, model, api_key.as_deref(), messages, tools, image, tool_choice, *temperature, *repetition_penalty)
             }
-            LlmConfig::OpenAI { url, model, api_key, temperature } => {
-                self.chat_openai_compatible_with_tools(url, model, Some(api_key.as_str()), messages, tools, image, *temperature)
+            LlmConfig::OpenAI { url, model, api_key, temperature, repetition_penalty } => {
+                self.chat_openai_compatible_with_tools(url, model, Some(api_key.as_str()), messages, tools, image, tool_choice, *temperature, *repetition_penalty)
             }
         }
     }
@@ -119,6 +120,7 @@ impl LlmClient {
         tools: &[ToolDefinition],
         image: Option<&[u8]>,
         temperature: f32,
+        repetition_penalty: Option<f32>,
     ) -> Result<ChatResponse> {
         let endpoint = format!("{}/api/chat", url.trim_end_matches('/'));
 
@@ -178,14 +180,20 @@ impl LlmClient {
             }
         }
 
+        let mut options = json!({
+            "temperature": temperature
+        });
+
+        if let Some(rp) = repetition_penalty {
+            options.as_object_mut().unwrap().insert("repeat_penalty".to_string(), json!(rp));
+        }
+
         let body = json!({
             "model": model,
             "messages": ollama_messages,
             "tools": ollama_tools,
             "stream": false,
-            "options": {
-                "temperature": temperature
-            }
+            "options": options
         });
 
         let response = self.client
@@ -241,7 +249,9 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDefinition],
         image: Option<&[u8]>,
+        tool_choice: Option<String>,
         temperature: f32,
+        repetition_penalty: Option<f32>,
     ) -> Result<ChatResponse> {
         let endpoint = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
 
@@ -319,12 +329,20 @@ impl LlmClient {
             }
         }
 
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "messages": openai_messages,
             "tools": openai_tools,
             "temperature": temperature,
         });
+
+        if let Some(rp) = repetition_penalty {
+            body.as_object_mut().unwrap().insert("repetition_penalty".to_string(), json!(rp));
+        }
+
+        if let Some(tc) = tool_choice {
+            body.as_object_mut().unwrap().insert("tool_choice".to_string(), json!(tc));
+        }
 
         let mut request = self.client.post(&endpoint).json(&body);
 
@@ -380,17 +398,23 @@ impl LlmClient {
         Ok(ChatResponse { content, tool_calls })
     }
 
-    fn query_ollama(&self, url: &str, model: &str, image: &str, prompt: &str, temperature: f32) -> Result<String> {
+    fn query_ollama(&self, url: &str, model: &str, image: &str, prompt: &str, temperature: f32, repetition_penalty: Option<f32>) -> Result<String> {
         let endpoint = format!("{}/api/generate", url.trim_end_matches('/'));
+
+        let mut options = json!({
+            "temperature": temperature
+        });
+
+        if let Some(rp) = repetition_penalty {
+            options.as_object_mut().unwrap().insert("repeat_penalty".to_string(), json!(rp));
+        }
 
         let body = json!({
             "model": model,
             "prompt": prompt,
             "images": [image],
             "stream": false,
-            "options": {
-                "temperature": temperature
-            }
+            "options": options
         });
 
         let response = self.client
@@ -420,10 +444,11 @@ impl LlmClient {
         image: &str,
         prompt: &str,
         temperature: f32,
+        repetition_penalty: Option<f32>,
     ) -> Result<String> {
         let endpoint = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
 
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "temperature": temperature,
             "messages": [
@@ -444,6 +469,10 @@ impl LlmClient {
                 }
             ]
         });
+
+        if let Some(rp) = repetition_penalty {
+            body.as_object_mut().unwrap().insert("repetition_penalty".to_string(), json!(rp));
+        }
 
         let mut request = self.client.post(&endpoint).json(&body);
 

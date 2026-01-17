@@ -4,16 +4,16 @@
 //! vision models (via [`VisionCtl`]), and tool execution to accomplish
 //! specified goals on a Linux desktop.
 
+use crate::debugger::{AgentObserver, Iteration, NoopObserver};
 use crate::error::Result;
-use crate::llm::{LlmClient, LlmConfig, Message, get_action_tools, execute_tool};
-use crate::debugger::{AgentObserver, NoopObserver, Iteration};
+use crate::llm::{execute_tool, get_action_tools, LlmClient, LlmConfig, Message};
+use crate::primitives::{capture_screenshot, get_screen_dimensions, ScreenshotOptions};
 use crate::VisionCtl;
-use crate::primitives::{ScreenshotOptions, capture_screenshot, get_screen_dimensions};
 use serde_json::json;
 use std::fs;
-use std::time::Duration;
 use std::sync::Arc;
-use tracing::{info, debug, warn, error, trace};
+use std::time::Duration;
+use tracing::{debug, error, info, trace, warn};
 
 const ACTION_PROMPT: &str = r#"You are a GUI automation agent controlling a Linux desktop.
 
@@ -171,11 +171,7 @@ impl Agent {
             },
             Message {
                 role: "user".to_string(),
-                content: Some(format!(
-                    "Goal: {}\nStatus: {}",
-                    goal,
-                    self.cursor_status()?
-                )),
+                content: Some(format!("Goal: {}\nStatus: {}", goal, self.cursor_status()?)),
                 images: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -184,16 +180,19 @@ impl Agent {
 
         let mut action_tools = get_action_tools();
         if self.config.no_vision_tools {
-            // Filter out tools that rely on explicit computer vision queries 
+            // Filter out tools that rely on explicit computer vision queries
             // (the model still sees the screenshot but can't use these helpers)
-            action_tools.retain(|t| ![
-                "point_at", 
-                "move_to_icon", 
-                "find_template", 
-                "list_icons", 
-                "list_templates",
-                "ask_screen"
-            ].contains(&t.name.as_str()));
+            action_tools.retain(|t| {
+                ![
+                    "point_at",
+                    "move_to_icon",
+                    "find_template",
+                    "list_icons",
+                    "list_templates",
+                    "ask_screen",
+                ]
+                .contains(&t.name.as_str())
+            });
         }
 
         let mut iteration = 0;
@@ -237,10 +236,22 @@ impl Agent {
                 trace!(path = %path, "Saved iteration screenshot");
             }
 
-            debug!(iteration = iteration + 1, messages = messages.len(), "Querying LLM");
+            debug!(
+                iteration = iteration + 1,
+                messages = messages.len(),
+                "Querying LLM"
+            );
 
             // Log the last few messages for debugging
-            for (i, msg) in messages.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().enumerate() {
+            for (i, msg) in messages
+                .iter()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .enumerate()
+            {
                 trace!(
                     msg_idx = messages.len() - 4 + i,
                     role = %msg.role,
@@ -255,10 +266,7 @@ impl Agent {
             // (OpenAI API requires assistant after tool, not user)
             let last_role = messages.last().map(|m| m.role.as_str());
             if last_role != Some("tool") {
-                let status_message = format!(
-                    "Status: {}",
-                    self.cursor_status()?,
-                );
+                let status_message = format!("Status: {}", self.cursor_status()?,);
                 messages.push(Message {
                     role: "user".to_string(),
                     content: Some(status_message),
@@ -277,7 +285,12 @@ impl Agent {
             };
 
             self.observer.on_llm_query(&messages, &tools);
-            let response = self.llm_client.chat_with_tools(&messages, &tools, iter_screenshot, Some("required".to_string()))?;
+            let response = self.llm_client.chat_with_tools(
+                &messages,
+                &tools,
+                iter_screenshot,
+                Some("required".to_string()),
+            )?;
 
             if let Some(tool_calls) = &response.tool_calls {
                 // Add the assistant's message with tool calls to history FIRST
@@ -296,10 +309,13 @@ impl Agent {
                         // If a previous tool failed, we must signal that we're skipping this one
                         messages.push(Message {
                             role: "tool".to_string(),
-                            content: Some(json!({
-                                "success": false,
-                                "error": "Skipped due to previously failed tool in sequence."
-                            }).to_string()),
+                            content: Some(
+                                json!({
+                                    "success": false,
+                                    "error": "Skipped due to previously failed tool in sequence."
+                                })
+                                .to_string(),
+                            ),
                             images: None,
                             tool_calls: None,
                             tool_call_id: call.id.clone(),
@@ -313,12 +329,17 @@ impl Agent {
                     info!(tool = %tool_name, args = %tool_args, "Executing tool");
                     self.observer.on_tool_start(tool_name, tool_args);
 
-
-
                     // Check for task_complete
                     if tool_name == "task_complete" {
-                        let success = tool_args.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let message = tool_args.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let success = tool_args
+                            .get("success")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let message = tool_args
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
 
                         if success {
                             info!(message = %message, "Task completed successfully");
@@ -339,7 +360,8 @@ impl Agent {
                     // Check for stuck - agent is requesting help
                     if tool_name == "stuck" {
                         warn!("Agent signaled stuck");
-                        self.observer.on_task_complete(false, "Agent is stuck and needs help");
+                        self.observer
+                            .on_task_complete(false, "Agent is stuck and needs help");
                         return Ok(AgentResult {
                             success: false,
                             message: "Agent is stuck and needs help".to_string(),
@@ -348,35 +370,35 @@ impl Agent {
                         });
                     }
 
-
                     // Execute the tool
-                    let (result, tool_failed) = match execute_tool(&self.ctl, tool_name, tool_args.clone()) {
-                        Ok(mut r) => {
-                            debug!(result = %r, "Tool succeeded");
-                            // Include cursor status in result so LLM sees state after action
-                            if let Ok(status) = self.cursor_status() {
-                                if let Some(obj) = r.as_object_mut() {
-                                    obj.insert("cursor_status".to_string(), json!(status));
+                    let (result, tool_failed) =
+                        match execute_tool(&self.ctl, tool_name, tool_args.clone()) {
+                            Ok(mut r) => {
+                                debug!(result = %r, "Tool succeeded");
+                                // Include cursor status in result so LLM sees state after action
+                                if let Ok(status) = self.cursor_status() {
+                                    if let Some(obj) = r.as_object_mut() {
+                                        obj.insert("cursor_status".to_string(), json!(status));
+                                    }
                                 }
+                                (r, false)
                             }
-                            (r, false)
-                        }
-                        Err(e) => {
-                            error!(error = %e, tool = %tool_name, "Tool failed");
-                            let mut err = json!({"success": false, "error": e.to_string()});
-                            if let Ok(status) = self.cursor_status() {
-                                if let Some(obj) = err.as_object_mut() {
-                                    obj.insert("cursor_status".to_string(), json!(status));
+                            Err(e) => {
+                                error!(error = %e, tool = %tool_name, "Tool failed");
+                                let mut err = json!({"success": false, "error": e.to_string()});
+                                if let Ok(status) = self.cursor_status() {
+                                    if let Some(obj) = err.as_object_mut() {
+                                        obj.insert("cursor_status".to_string(), json!(status));
+                                    }
                                 }
+                                (err, true)
                             }
-                            (err, true)
-                        }
-                    };
+                        };
 
                     self.observer.on_tool_end(tool_name, &result);
 
                     actions_taken.push(format!("{}({})", tool_name, tool_args));
-                    
+
                     if tool_failed {
                         stop_execution = true;
                     }
@@ -412,7 +434,9 @@ impl Agent {
 
                 messages.push(Message {
                     role: "user".to_string(),
-                    content: Some("Use the tools to take an action. What should we do next?".to_string()),
+                    content: Some(
+                        "Use the tools to take an action. What should we do next?".to_string(),
+                    ),
                     images: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -424,7 +448,10 @@ impl Agent {
         warn!(max = ?self.config.max_iterations, "Iteration limit reached");
         Ok(AgentResult {
             success: false,
-            message: format!("Iteration limit {:?} reached without completing the task", self.config.max_iterations),
+            message: format!(
+                "Iteration limit {:?} reached without completing the task",
+                self.config.max_iterations
+            ),
             iterations: iteration,
             actions_taken,
         })
@@ -437,5 +464,4 @@ impl Agent {
         let norm_y = cursor.y * 1000 / dims.height as i32;
         Ok(format!("cursor=({}, {})", norm_x, norm_y))
     }
-
 }

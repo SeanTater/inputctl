@@ -3,12 +3,14 @@
 //! This module contains core data structures and functions for screen capture,
 //! cursors, regions, and window management on the Linux desktop.
 
-pub mod grid;
-pub mod screenshot;
 pub mod cursor;
+pub mod grid;
 pub mod screen;
+pub mod screenshot;
 
-pub use grid::CursorPos;
-pub use screenshot::{ScreenshotOptions, capture_screenshot, capture_screenshot_simple};
 pub use cursor::find_cursor;
-pub use screen::{get_screen_dimensions, Region, Window, list_windows, find_window};
+pub use grid::CursorPos;
+pub use screen::{find_window, get_screen_dimensions, list_windows, Region, Window};
+pub use screenshot::{
+    capture_screenshot, capture_screenshot_image, capture_screenshot_simple, ScreenshotOptions,
+};

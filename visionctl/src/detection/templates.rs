@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use crate::Result;
+use std::path::PathBuf;
 
 /// Get user's template directory (~/.config/visionctl/templates/)
 pub fn get_template_dir() -> PathBuf {
@@ -11,8 +11,9 @@ pub fn get_template_dir() -> PathBuf {
 pub fn ensure_template_dir() -> Result<()> {
     let dir = get_template_dir();
     if !dir.exists() {
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| crate::Error::ScreenshotFailed(format!("Failed to create template directory: {}", e)))?;
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            crate::Error::ScreenshotFailed(format!("Failed to create template directory: {}", e))
+        })?;
     }
     Ok(())
 }
@@ -23,11 +24,12 @@ pub fn list_available_templates() -> Result<Vec<String>> {
     let dir = get_template_dir();
 
     let mut templates = Vec::new();
-    for entry in std::fs::read_dir(dir)
-        .map_err(|e| crate::Error::ScreenshotFailed(format!("Failed to read template directory: {}", e)))?
-    {
-        let entry = entry
-            .map_err(|e| crate::Error::ScreenshotFailed(format!("Failed to read directory entry: {}", e)))?;
+    for entry in std::fs::read_dir(dir).map_err(|e| {
+        crate::Error::ScreenshotFailed(format!("Failed to read template directory: {}", e))
+    })? {
+        let entry = entry.map_err(|e| {
+            crate::Error::ScreenshotFailed(format!("Failed to read directory entry: {}", e))
+        })?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("png") {
             if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {

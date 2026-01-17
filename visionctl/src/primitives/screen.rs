@@ -42,8 +42,10 @@ impl Region {
 
     /// Check if a point is within the region
     pub fn contains(&self, x: i32, y: i32) -> bool {
-        x >= self.x && x < self.x + self.width as i32 &&
-        y >= self.y && y < self.y + self.height as i32
+        x >= self.x
+            && x < self.x + self.width as i32
+            && y >= self.y
+            && y < self.y + self.height as i32
     }
 }
 
@@ -306,15 +308,20 @@ pub fn list_windows() -> Result<Vec<Window>> {
                 windows.push(Window {
                     id,
                     title,
-                    region: Region { x, y, width, height },
+                    region: Region {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
                 });
             }
         }
     }
-    
+
     // Reverse to match original order (we iterated rev() to find recent first)
     // But since unrelated lines are skipped, order might be mixed if we read too far back.
-    // Ideally we filter by unique ID and take the most recent occurrence? 
+    // Ideally we filter by unique ID and take the most recent occurrence?
     // Yes, KWin prints once. `journalctl -n 200` might contain stale runs if we run fast.
     // The marker includes process ID, so that helps uniqueness per run.
     windows.reverse();
@@ -325,7 +332,7 @@ pub fn list_windows() -> Result<Vec<Window>> {
 pub fn find_window(name: &str) -> Result<Option<Window>> {
     let windows = list_windows()?;
     let name_lower = name.to_lowercase();
-    
+
     // Find best match (exact match > substring match)
     // Or just first substring match
     for win in windows {

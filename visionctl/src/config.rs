@@ -3,12 +3,12 @@
 //! This module handles loading and saving settings from `~/.config/visionctl/config.toml`,
 //! including LLM backend details and UI preferences.
 
+use crate::error::Result;
+use crate::llm::LlmConfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tracing::warn;
-use crate::error::Result;
-use crate::llm::LlmConfig;
 
 /// Main configuration for visionctl
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -49,7 +49,7 @@ pub struct LlmSettings {
 }
 
 fn default_temperature() -> f32 {
-    0.0  // Deterministic by default for GUI automation
+    0.0 // Deterministic by default for GUI automation
 }
 
 fn default_backend() -> String {
@@ -144,12 +144,10 @@ impl Config {
         let path = Self::path();
         if path.exists() {
             match fs::read_to_string(&path) {
-                Ok(contents) => {
-                    match toml::from_str(&contents) {
-                        Ok(config) => return config,
-                        Err(e) => warn!(error = %e, "Failed to parse config"),
-                    }
-                }
+                Ok(contents) => match toml::from_str(&contents) {
+                    Ok(config) => return config,
+                    Err(e) => warn!(error = %e, "Failed to parse config"),
+                },
                 Err(e) => warn!(error = %e, "Failed to read config"),
             }
         }

@@ -5,8 +5,8 @@
 //! the mapping between LLM function calls and local Rust functions.
 
 use crate::{Result, VisionCtl};
-use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 /// Tool definition for LLM tool-calling APIs (Anthropic/OpenAI compatible)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,8 +15,6 @@ pub struct ToolDefinition {
     pub description: String,
     pub input_schema: Value,
 }
-
-
 
 /// Get action tools for the agent
 pub fn get_action_tools() -> Vec<ToolDefinition> {
@@ -277,15 +275,19 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
         args = %serde_json::to_string(&params).unwrap_or_else(|_| "serialization failed".to_string()),
         "Executing tool"
     );
-    
+
     let result = match name {
         "move_to" => {
-            let x = params.get("x")
+            let x = params
+                .get("x")
                 .and_then(|v| v.as_i64())
-                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'x' parameter".into()))? as i32;
-            let y = params.get("y")
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'x' parameter".into()))?
+                as i32;
+            let y = params
+                .get("y")
                 .and_then(|v| v.as_i64())
-                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'y' parameter".into()))? as i32;
+                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'y' parameter".into()))?
+                as i32;
 
             // Use VisionCtl's coordinate conversion (respects viewport)
             let (px, py) = ctl.to_screen_coords(x, y)?;
@@ -299,9 +301,15 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
         "set_viewport" => {
             let _x = params.get("x").and_then(|v| v.as_i64()).map(|v| v as i32);
             let _y = params.get("y").and_then(|v| v.as_i64()).map(|v| v as i32);
-            let _width = params.get("width").and_then(|v| v.as_i64()).map(|v| v as u32);
-            let _height = params.get("height").and_then(|v| v.as_i64()).map(|v| v as u32);
-            
+            let _width = params
+                .get("width")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as u32);
+            let _height = params
+                .get("height")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as u32);
+
             // This is a bit tricky because VisionCtl is immutable in execute_tool signature?
             // Ah, execute_tool takes &VisionCtl. We need interior mutability or change signature.
             // But VisionCtl is designed to be shared.
@@ -314,24 +322,27 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             // Or assume the agent loop handles viewport changes?
             // The task was "Refactor visionctl to work with ... region", so presumably the tool should be able to set it?
             // Or maybe it's set by the caller?
-            // Let's stick to the plan. `set_viewport` is not in the original tool list in `tools.rs`. 
-            // The plan didn't explicitly say we'd add a `set_viewport` tool for the LLM. 
+            // Let's stick to the plan. `set_viewport` is not in the original tool list in `tools.rs`.
+            // The plan didn't explicitly say we'd add a `set_viewport` tool for the LLM.
             // It said "Update VisionCtl to manage an active viewport".
             // Since we are adding `set_viewport` method to `VisionCtl`, we probably want to expose it?
             // But for now let's just make sure `move_to` works.
-            
+
             // Wait, if I can't set the viewport via tool, how does it get set?
             // Maybe we just expose it for the embedding application?
             // The user request was "refactor visionctl to work with ... a window ...".
             // Usually this means the meaningful "screen" is set programmatically.
             // But for testing we might want to set it.
             // Let's assume for now `move_to` is the priority.
-            
-            Err(crate::Error::ScreenshotFailed("set_viewport tool not implemented yet".into()))
+
+            Err(crate::Error::ScreenshotFailed(
+                "set_viewport tool not implemented yet".into(),
+            ))
         }
 
         "click" => {
-            let button_str = params.get("button")
+            let button_str = params
+                .get("button")
                 .and_then(|v| v.as_str())
                 .unwrap_or("left");
 
@@ -349,7 +360,8 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }))
         }
         "type_text" => {
-            let text = params.get("text")
+            let text = params
+                .get("text")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'text' parameter".into()))?;
 
@@ -360,7 +372,8 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }))
         }
         "key_press" => {
-            let key = params.get("key")
+            let key = params
+                .get("key")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'key' parameter".into()))?;
 
@@ -371,7 +384,8 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }))
         }
         "double_click" => {
-            let button_str = params.get("button")
+            let button_str = params
+                .get("button")
                 .and_then(|v| v.as_str())
                 .unwrap_or("left");
 
@@ -388,7 +402,8 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }))
         }
         "mouse_down" => {
-            let button_str = params.get("button")
+            let button_str = params
+                .get("button")
                 .and_then(|v| v.as_str())
                 .unwrap_or("left");
 
@@ -405,7 +420,8 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }))
         }
         "mouse_up" => {
-            let button_str = params.get("button")
+            let button_str = params
+                .get("button")
                 .and_then(|v| v.as_str())
                 .unwrap_or("left");
 
@@ -432,7 +448,8 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }))
         }
         "key_down" => {
-            let key = params.get("key")
+            let key = params
+                .get("key")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'key' parameter".into()))?;
 
@@ -443,7 +460,8 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }))
         }
         "key_up" => {
-            let key = params.get("key")
+            let key = params
+                .get("key")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'key' parameter".into()))?;
 
@@ -468,8 +486,8 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                     "in_viewport": true
                 }))
             } else {
-                 Ok(json!({
-                    "success": true, 
+                Ok(json!({
+                    "success": true,
                     // We don't return x,y if outside viewport
                     "pixel_x": cursor.x,
                     "pixel_y": cursor.y,
@@ -479,7 +497,10 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }
         }
         "task_complete" => {
-            let success = params.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            let success = params
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
             Ok(json!({
                 "success": success,
@@ -489,7 +510,10 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
         }
 
         "target_reached" => {
-            let success = params.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            let success = params
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
             Ok(json!({
                 "success": success,
@@ -507,14 +531,16 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }))
         }
         "move_to_icon" | "find_template" => {
-            use crate::detection;
             use crate::actions::move_to_pixel;
+            use crate::detection;
 
-            let name = params.get("name")
+            let name = params
+                .get("name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'name' parameter".into()))?;
 
-            let threshold = params.get("threshold")
+            let threshold = params
+                .get("threshold")
                 .and_then(|v| v.as_f64())
                 .map(|v| v as f32)
                 .unwrap_or(0.8);
@@ -522,8 +548,9 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             // Take screenshot
             let screenshot = crate::VisionCtl::screenshot()?;
             let temp_path = "/tmp/visionctl_template_search.png";
-            std::fs::write(temp_path, &screenshot)
-                .map_err(|e| crate::Error::ScreenshotFailed(format!("Failed to write screenshot: {}", e)))?;
+            std::fs::write(temp_path, &screenshot).map_err(|e| {
+                crate::Error::ScreenshotFailed(format!("Failed to write screenshot: {}", e))
+            })?;
 
             // Find template file
             let template_path = detection::find_template_file(name)?;
@@ -532,7 +559,7 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             let detections = detection::find_template(
                 temp_path,
                 template_path.to_str().unwrap(),
-                Some(threshold)
+                Some(threshold),
             )?;
 
             // Clean up
@@ -559,10 +586,13 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             }
         }
         "point_at" => {
-            let description = params.get("description")
+            let description = params
+                .get("description")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'description' parameter".into()))?;
-            
+                .ok_or_else(|| {
+                    crate::Error::ScreenshotFailed("Missing 'description' parameter".into())
+                })?;
+
             let _model_override = params.get("model").and_then(|v| v.as_str());
 
             // Check for high resolution which might cause pointing inaccuracies
@@ -592,10 +622,10 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             );
 
             let response = ctl.ask_pointing(&prompt)?;
-            
+
             // 3. Parse coordinates (simple greedy [x, y] extraction)
             let coords = parse_coordinates(&response);
-            
+
             match coords {
                 Some((x, y)) => {
                     // x, y are normalized within the viewport (0-1000)
@@ -608,18 +638,19 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                         "message": format!("Pointed at '{}' at ({}, {})", description, x, y)
                     }))
                 }
-                None => {
-                    Ok(json!({
-                        "success": false,
-                        "message": format!("Could not parse coordinates from model response: {}", response)
-                    }))
-                }
+                None => Ok(json!({
+                    "success": false,
+                    "message": format!("Could not parse coordinates from model response: {}", response)
+                })),
             }
         }
         "ask_screen" => {
-            let question = params.get("question")
+            let question = params
+                .get("question")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| crate::Error::ScreenshotFailed("Missing 'question' parameter".into()))?;
+                .ok_or_else(|| {
+                    crate::Error::ScreenshotFailed("Missing 'question' parameter".into())
+                })?;
 
             let answer = ctl.ask(question)?;
             Ok(json!({
@@ -629,17 +660,16 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
                 "message": format!("Answer: {}", answer)
             }))
         }
-        "stuck" => {
-            Ok(json!({
-                "success": true,
-                "message": "Stuck signal received"
-            }))
-        }
-        _ => {
-            Err(crate::Error::ScreenshotFailed(format!("Unknown tool: {}", name)))
-        }
+        "stuck" => Ok(json!({
+            "success": true,
+            "message": "Stuck signal received"
+        })),
+        _ => Err(crate::Error::ScreenshotFailed(format!(
+            "Unknown tool: {}",
+            name
+        ))),
     };
-    
+
     // Log the result
     match &result {
         Ok(res) => {
@@ -673,7 +703,7 @@ pub fn execute_tool(ctl: &VisionCtl, name: &str, params: Value) -> Result<Value>
             );
         }
     }
-    
+
     result
 }
 
@@ -694,7 +724,9 @@ pub fn parse_coordinates(s: &str) -> Option<(i32, i32)> {
     }
 
     // 2. Fallback to regex for more robust parsing of messy JSON or plain lists
-    let re_bbox = regex::Regex::new(r#""bbox_2d"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]"#).ok()?;
+    let re_bbox =
+        regex::Regex::new(r#""bbox_2d"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]"#)
+            .ok()?;
     if let Some(caps) = re_bbox.captures(s) {
         let x1 = caps.get(1)?.as_str().parse::<i32>().ok()?;
         let y1 = caps.get(2)?.as_str().parse::<i32>().ok()?;

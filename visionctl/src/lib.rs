@@ -13,28 +13,33 @@
 //! # Examples
 //! See the `examples/` directory for common usage patterns.
 
-mod error;
-mod llm;
-mod primitives;
 mod actions;
 pub mod agent;
 pub mod config;
-pub mod detection;
 pub mod debugger;
+pub mod detection;
+mod error;
+mod llm;
+mod primitives;
+pub mod recorder;
 pub mod server;
 
 pub use error::{Error, Result};
-pub use llm::{LlmConfig, parse_coordinates};
-pub use config::{Config, LlmSettings, CursorSettings};
-pub use primitives::{CursorPos, find_cursor, get_screen_dimensions, Region, Window, list_windows, find_window};
+
 pub use actions::MouseButton;
 pub use agent::{Agent, AgentConfig, AgentResult};
+pub use config::{Config, CursorSettings, LlmSettings};
 pub use detection::Detection;
+pub use llm::{parse_coordinates, LlmConfig};
+pub use primitives::{
+    capture_screenshot_image, find_cursor, find_window, get_screen_dimensions, list_windows,
+    CursorPos, Region, ScreenshotOptions, Window,
+};
 
+use crate::debugger::{AgentObserver, NoopObserver};
 use llm::LlmClient;
 use primitives::{capture_screenshot, capture_screenshot_simple};
 use std::sync::Arc;
-use crate::debugger::{AgentObserver, NoopObserver};
 
 /// Virtual vision controller for screen capture, LLM queries, and GUI automation
 pub struct VisionCtl {
@@ -134,11 +139,15 @@ impl VisionCtl {
             // Clamp to screen bounds for safety, or allow out of bounds?
             // "Normalized" usually implies 0-1000, so we should probably check bounds or clamp.
             // But if it's outside the screen, it's outside the "viewport" of the full screen too.
-            if screen_x < 0 || screen_y < 0 || screen_x > dims.width as i32 || screen_y > dims.height as i32 {
-                 // Technically outside full screen, but maybe we just clamp? 
-                 // Let's stick to the pattern: if it's wildly out, maybe None?
-                 // But for full screen, usually we just clamp in move_to.
-                 // Let's just do the math.
+            if screen_x < 0
+                || screen_y < 0
+                || screen_x > dims.width as i32
+                || screen_y > dims.height as i32
+            {
+                // Technically outside full screen, but maybe we just clamp?
+                // Let's stick to the pattern: if it's wildly out, maybe None?
+                // But for full screen, usually we just clamp in move_to.
+                // Let's just do the math.
             }
             let norm_x = screen_x * 1000 / dims.width as i32;
             let norm_y = screen_y * 1000 / dims.height as i32;
@@ -146,12 +155,21 @@ impl VisionCtl {
         }
     }
 
-
     // === Primitives (both patterns use these) ===
 
     /// Capture a screenshot and return PNG bytes (static method)
     pub fn screenshot() -> Result<Vec<u8>> {
         capture_screenshot_simple()
+    }
+
+    /// Capture raw screenshot (static method)
+    pub fn screenshot_raw(width: u32, height: u32) -> Result<Vec<u8>> {
+        primitives::screenshot::capture_screenshot_raw(width, height)
+    }
+
+    /// Capture raw screenshot with cropping (static method)
+    pub fn screenshot_raw_cropped(region: Option<Region>) -> Result<(Vec<u8>, u32, u32)> {
+        primitives::screenshot::capture_screenshot_raw_cropped(region)
     }
 
     pub fn screenshot_with_cursor(&self) -> Result<Vec<u8>> {
@@ -165,6 +183,11 @@ impl VisionCtl {
         Ok(data.png_bytes)
     }
 
+    /// Find a window by title (wrapper around primitive)
+    pub fn find_window(name: &str) -> Result<Option<Window>> {
+        primitives::find_window(name)
+    }
+
     /// Find cursor position
     pub fn find_cursor(&self) -> Result<CursorPos> {
         primitives::find_cursor()
@@ -174,8 +197,11 @@ impl VisionCtl {
 
     /// Capture screenshot and query the LLM
     pub fn ask(&self, question: &str) -> Result<String> {
-        let client = self.llm_client.as_ref()
-            .ok_or_else(|| Error::ScreenshotFailed("No LLM configured - use new() instead of new_headless()".into()))?;
+        let client = self.llm_client.as_ref().ok_or_else(|| {
+            Error::ScreenshotFailed(
+                "No LLM configured - use new() instead of new_headless()".into(),
+            )
+        })?;
         let image = self.screenshot_with_cursor()?;
         client.query(&image, question)
     }
@@ -189,7 +215,9 @@ impl VisionCtl {
             // Fallback to main model if no pointing specialist is configured
             client.query(&image, question)
         } else {
-            Err(Error::ScreenshotFailed("No LLM configured for pointing".into()))
+            Err(Error::ScreenshotFailed(
+                "No LLM configured for pointing".into(),
+            ))
         }
     }
     /// Query the pointing specialist with a provided image
@@ -200,7 +228,9 @@ impl VisionCtl {
             // Fallback to main model if no pointing specialist is configured
             client.query(image, question)
         } else {
-            Err(Error::ScreenshotFailed("No LLM configured for pointing".into()))
+            Err(Error::ScreenshotFailed(
+                "No LLM configured for pointing".into(),
+            ))
         }
     }
 
@@ -261,7 +291,13 @@ mod python {
     impl PyVisionCtl {
         #[new]
         #[pyo3(signature = (backend, url, model, api_key=None, temperature=0.0))]
-        fn new(backend: &str, url: &str, model: &str, api_key: Option<&str>, temperature: f32) -> PyResult<Self> {
+        fn new(
+            backend: &str,
+            url: &str,
+            model: &str,
+            api_key: Option<&str>,
+            temperature: f32,
+        ) -> PyResult<Self> {
             let settings = LlmSettings {
                 backend: backend.to_string(),
                 base_url: url.to_string(),
@@ -270,13 +306,12 @@ mod python {
                 temperature,
             };
 
-            let config = settings.to_llm_config().map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(e.to_string())
-            })?;
+            let config = settings
+                .to_llm_config()
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-            let inner = VisionCtl::new(config).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })?;
+            let inner = VisionCtl::new(config)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
 
             Ok(Self { inner })
         }
@@ -291,7 +326,14 @@ mod python {
 
         /// Configure a dedicated pointing model (e.g., Qwen3)
         #[pyo3(signature = (backend, url, model, api_key=None, temperature=0.0))]
-        fn set_pointing_model(&mut self, backend: &str, url: &str, model: &str, api_key: Option<&str>, temperature: f32) -> PyResult<()> {
+        fn set_pointing_model(
+            &mut self,
+            backend: &str,
+            url: &str,
+            model: &str,
+            api_key: Option<&str>,
+            temperature: f32,
+        ) -> PyResult<()> {
             let settings = LlmSettings {
                 backend: backend.to_string(),
                 base_url: url.to_string(),
@@ -300,13 +342,12 @@ mod python {
                 temperature,
             };
 
-            let config = settings.to_llm_config().map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(e.to_string())
-            })?;
+            let config = settings
+                .to_llm_config()
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-            let client = LlmClient::new(config).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })?;
+            let client = LlmClient::new(config)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
 
             self.inner.pointing_client = Some(client);
             Ok(())
@@ -315,26 +356,28 @@ mod python {
         /// Capture a screenshot and return PNG bytes
         #[staticmethod]
         fn screenshot() -> PyResult<Vec<u8>> {
-            VisionCtl::screenshot()
-                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+            VisionCtl::screenshot().map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Capture screenshot with cursor marker and return PNG bytes
         fn screenshot_with_cursor(&self) -> PyResult<Vec<u8>> {
-            self.inner.screenshot_with_cursor()
+            self.inner
+                .screenshot_with_cursor()
                 .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Capture screenshot and query LLM
         fn ask(&self, question: &str) -> PyResult<String> {
-            self.inner.ask(question)
+            self.inner
+                .ask(question)
                 .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Move cursor to position using 0-1000 normalized coordinates
         #[pyo3(signature = (x, y, smooth=true))]
         fn move_to(&self, x: i32, y: i32, smooth: bool) -> PyResult<()> {
-            self.inner.move_to(x, y, smooth)
+            self.inner
+                .move_to(x, y, smooth)
                 .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
@@ -346,19 +389,22 @@ mod python {
                 "middle" => MouseButton::Middle,
                 _ => MouseButton::Left,
             };
-            self.inner.click(btn)
+            self.inner
+                .click(btn)
                 .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Type text using keyboard
         fn type_text(&self, text: &str) -> PyResult<()> {
-            self.inner.type_text(text)
+            self.inner
+                .type_text(text)
                 .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Press a key (e.g., "enter", "escape", "ctrl")
         fn key_press(&self, key: &str) -> PyResult<()> {
-            self.inner.key_press(key)
+            self.inner
+                .key_press(key)
                 .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
@@ -366,13 +412,16 @@ mod python {
         fn get_tool_definitions(&self) -> PyResult<Vec<PyObject>> {
             Python::with_gil(|py| {
                 let tools = self.inner.get_tool_definitions();
-                tools.iter().map(|tool| {
-                    let dict = pyo3::types::PyDict::new_bound(py);
-                    dict.set_item("name", &tool.name)?;
-                    dict.set_item("description", &tool.description)?;
-                    dict.set_item("input_schema", tool.input_schema.to_string())?;
-                    Ok(dict.into())
-                }).collect()
+                tools
+                    .iter()
+                    .map(|tool| {
+                        let dict = pyo3::types::PyDict::new_bound(py);
+                        dict.set_item("name", &tool.name)?;
+                        dict.set_item("description", &tool.description)?;
+                        dict.set_item("input_schema", tool.input_schema.to_string())?;
+                        Ok(dict.into())
+                    })
+                    .collect()
             })
         }
 
@@ -382,11 +431,15 @@ mod python {
                 // Convert Python dict to JSON Value
                 let json_str = params.call_method0(py, "__str__")?;
                 let json_str: String = json_str.extract(py)?;
-                let params_value: serde_json::Value = serde_json::from_str(&json_str)
-                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+                let params_value: serde_json::Value =
+                    serde_json::from_str(&json_str).map_err(|e| {
+                        pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {}", e))
+                    })?;
 
                 // Execute tool
-                let result = self.inner.execute_tool(name, params_value)
+                let result = self
+                    .inner
+                    .execute_tool(name, params_value)
                     .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
 
                 // Convert result back to Python dict

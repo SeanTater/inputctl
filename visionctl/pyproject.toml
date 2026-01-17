@@ -12,7 +12,6 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
     "Operating System :: POSIX :: Linux",
 ]
-
 [dependency-groups]
 dev = ["pytest>=8.0"]
 

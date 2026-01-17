@@ -15,3 +15,11 @@ dist/
 scratch/
 *.log
 COMMIT_MESSAGE.txt
+
+# Reflex training artifacts
+reflex_train/checkpoints*/
+reflex_train/dataset/
+reflex_train/*.onnx
+reflex_train/*.onnx.data
+reflex_train/*_manifest.json
+reflex_train/preds*.jsonl

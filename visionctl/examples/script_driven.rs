@@ -10,8 +10,7 @@
 ///   - KDE Plasma 6.0+ with KWin
 ///   - Ollama running with llava model
 ///   - /dev/uinput access
-
-use visionctl::{VisionCtl, LlmConfig};
+use visionctl::{LlmConfig, VisionCtl};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Script-Driven GUI Automation Example ===\n");
@@ -30,7 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Screenshot captured\n");
 
     println!("Step 2: Asking LLM to identify something on screen...");
-    let answer = ctl.ask("What application windows are visible on the screen? List them briefly.")?;
+    let answer =
+        ctl.ask("What application windows are visible on the screen? List them briefly.")?;
     println!("LLM Response: {}\n", answer);
 
     println!("Step 3: Script decides next action based on LLM's response...");
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let location = ctl.ask(
         "Looking at the screen, where is a terminal or console window? \
         Respond with normalized coordinates (0-1000 scale where 0,0 is top-left \
-        and 1000,1000 is bottom-right). Format: 'x,y' or say 'none' if you don't see one."
+        and 1000,1000 is bottom-right). Format: 'x,y' or say 'none' if you don't see one.",
     )?;
     println!("LLM says the terminal is at: {}\n", location);
 

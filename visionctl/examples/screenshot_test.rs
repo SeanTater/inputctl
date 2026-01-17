@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::Write;
 /// Simple Screenshot Test - No LLM Required
 ///
 /// This example captures a screenshot with cursor marker and saves it to a file.
@@ -10,10 +12,7 @@
 /// Requirements:
 ///   - KDE Plasma 6.0+ with KWin
 ///   - Desktop file with screenshot permission (see README)
-
 use visionctl::VisionCtl;
-use std::fs::File;
-use std::io::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== VisionCtl Screenshot Test ===\n");
@@ -35,7 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Test Complete ===");
     println!("\nYou can now open the screenshot to verify:");
     println!("  xdg-open {}", output_path);
-    println!("\nThe screenshot should show the current cursor position marked with a red crosshair.\n");
+    println!(
+        "\nThe screenshot should show the current cursor position marked with a red crosshair.\n"
+    );
 
     Ok(())
 }

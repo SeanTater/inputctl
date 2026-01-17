@@ -18,10 +18,13 @@ pub fn find_cursor() -> Result<CursorPos> {
     let script_file = NamedTempFile::with_suffix(".js")
         .map_err(|e| Error::ScreenshotFailed(format!("Failed to create script file: {}", e)))?;
 
-    let script_content = format!(r#"
+    let script_content = format!(
+        r#"
         var pos = workspace.cursorPos;
         print("{}_" + pos.x + "_" + pos.y);
-    "#, marker);
+    "#,
+        marker
+    );
 
     fs::write(script_file.path(), &script_content)
         .map_err(|e| Error::ScreenshotFailed(format!("Failed to write script: {}", e)))?;
@@ -35,7 +38,8 @@ pub fn find_cursor() -> Result<CursorPos> {
         "org.kde.KWin",
         "/Scripting",
         "org.kde.kwin.Scripting",
-    ).map_err(|e| Error::ScreenshotFailed(format!("KWin Scripting interface not found: {}", e)))?;
+    )
+    .map_err(|e| Error::ScreenshotFailed(format!("KWin Scripting interface not found: {}", e)))?;
 
     // Load the script
     let script_path = script_file.path().to_string_lossy().to_string();
@@ -56,9 +60,11 @@ pub fn find_cursor() -> Result<CursorPos> {
         "org.kde.KWin",
         script_obj_path,
         "org.kde.kwin.Script",
-    ).map_err(|e| Error::ScreenshotFailed(format!("Script proxy failed: {}", e)))?;
+    )
+    .map_err(|e| Error::ScreenshotFailed(format!("Script proxy failed: {}", e)))?;
 
-    script_proxy.call_method("run", &())
+    script_proxy
+        .call_method("run", &())
         .map_err(|e| Error::ScreenshotFailed(format!("Failed to run script: {}", e)))?;
 
     // Give script time to execute
@@ -66,7 +72,16 @@ pub fn find_cursor() -> Result<CursorPos> {
 
     // Read from journalctl
     let output = Command::new("journalctl")
-        .args(["--user", "-u", "plasma-kwin_wayland", "-n", "50", "--no-pager", "-o", "cat"])
+        .args([
+            "--user",
+            "-u",
+            "plasma-kwin_wayland",
+            "-n",
+            "50",
+            "--no-pager",
+            "-o",
+            "cat",
+        ])
         .output()
         .map_err(|e| Error::ScreenshotFailed(format!("Failed to run journalctl: {}", e)))?;
 
@@ -81,17 +96,26 @@ pub fn find_cursor() -> Result<CursorPos> {
             // Parse "MARKER_x_y" format
             let parts: Vec<&str> = line.split('_').collect();
             if parts.len() >= 3 {
-                let x: i32 = parts[parts.len() - 2].parse()
+                let x: i32 = parts[parts.len() - 2]
+                    .parse()
                     .map_err(|_| Error::ScreenshotFailed(format!("Invalid x in: {}", line)))?;
-                let y: i32 = parts[parts.len() - 1].parse()
+                let y: i32 = parts[parts.len() - 1]
+                    .parse()
                     .map_err(|_| Error::ScreenshotFailed(format!("Invalid y in: {}", line)))?;
 
-                return Ok(CursorPos { x, y, grid_cell: None });
+                return Ok(CursorPos {
+                    x,
+                    y,
+                    grid_cell: None,
+                });
             }
         }
     }
 
-    Err(Error::ScreenshotFailed(format!("Cursor position not found in journal (marker: {})", marker)))
+    Err(Error::ScreenshotFailed(format!(
+        "Cursor position not found in journal (marker: {})",
+        marker
+    )))
 }
 
 #[cfg(test)]

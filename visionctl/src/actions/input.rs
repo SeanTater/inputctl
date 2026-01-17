@@ -18,7 +18,10 @@ fn get_config() -> &'static Config {
 fn get_input_ctl() -> Result<&'static Mutex<inputctl::InputCtl>> {
     // Use get_or_init with panic on error (InputCtl initialization should not fail in normal operation)
     Ok(INPUT_CTL.get_or_init(|| {
-        Mutex::new(inputctl::InputCtl::new().expect("Failed to initialize InputCtl - check /dev/uinput permissions"))
+        Mutex::new(
+            inputctl::InputCtl::new()
+                .expect("Failed to initialize InputCtl - check /dev/uinput permissions"),
+        )
     }))
 }
 
@@ -42,9 +45,10 @@ pub fn double_click(button: MouseButton) -> Result<()> {
     let ctl = get_input_ctl()?;
     let mut ctl = ctl.lock().unwrap();
 
-    ctl.click(button)
-        .map_err(|e| Error::ScreenshotFailed(format!("First click of double click failed: {}", e)))?;
-    
+    ctl.click(button).map_err(|e| {
+        Error::ScreenshotFailed(format!("First click of double click failed: {}", e))
+    })?;
+
     // Human-scale non-configurable delay
     std::thread::sleep(std::time::Duration::from_millis(150));
 

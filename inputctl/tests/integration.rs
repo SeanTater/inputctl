@@ -4,7 +4,7 @@
 //! Run with: sudo cargo test -- --ignored
 
 use evdev::Key;
-use inputctl::{Curve, MouseButton, InputCtl};
+use inputctl::{Curve, InputCtl, MouseButton};
 
 #[test]
 #[ignore = "requires /dev/uinput access (run with sudo)"]
@@ -50,7 +50,11 @@ fn scroll() {
 fn mouse_move_smooth_linear() {
     let mut yd = InputCtl::new().expect("failed to create device");
     let result = yd.move_mouse_smooth(100, 50, 0.5, Curve::Linear, 2.0, 60);
-    assert!(result.is_ok(), "should move mouse smoothly: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "should move mouse smoothly: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -58,7 +62,11 @@ fn mouse_move_smooth_linear() {
 fn mouse_move_smooth_ease_in_out() {
     let mut yd = InputCtl::new().expect("failed to create device");
     let result = yd.move_mouse_smooth(100, 50, 1.0, Curve::EaseInOut, 2.0, 60);
-    assert!(result.is_ok(), "should move mouse smoothly with ease-in-out: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "should move mouse smoothly with ease-in-out: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -66,7 +74,11 @@ fn mouse_move_smooth_ease_in_out() {
 fn mouse_move_smooth_negative() {
     let mut yd = InputCtl::new().expect("failed to create device");
     let result = yd.move_mouse_smooth(-50, -30, 0.3, Curve::Linear, 2.0, 60);
-    assert!(result.is_ok(), "should move mouse smoothly in negative direction: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "should move mouse smoothly in negative direction: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -74,33 +86,57 @@ fn mouse_move_smooth_negative() {
 fn mouse_move_smooth_no_noise() {
     let mut yd = InputCtl::new().expect("failed to create device");
     let result = yd.move_mouse_smooth(100, 50, 1.0, Curve::Linear, 0.0, 60);
-    assert!(result.is_ok(), "should move mouse smoothly with no noise: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "should move mouse smoothly with no noise: {:?}",
+        result.err()
+    );
 }
 
 #[test]
 #[ignore = "requires /dev/uinput access (run with sudo)"]
 fn test_hold_state_tracking() {
     let mut ctl = InputCtl::new().expect("failed to create device");
-    assert!(!ctl.is_key_held(Key::KEY_A), "key should not be held initially");
+    assert!(
+        !ctl.is_key_held(Key::KEY_A),
+        "key should not be held initially"
+    );
 
     ctl.key_down(Key::KEY_A).expect("should press key down");
-    assert!(ctl.is_key_held(Key::KEY_A), "key should be held after key_down");
+    assert!(
+        ctl.is_key_held(Key::KEY_A),
+        "key should be held after key_down"
+    );
 
     ctl.key_up(Key::KEY_A).expect("should release key");
-    assert!(!ctl.is_key_held(Key::KEY_A), "key should not be held after key_up");
+    assert!(
+        !ctl.is_key_held(Key::KEY_A),
+        "key should not be held after key_up"
+    );
 }
 
 #[test]
 #[ignore = "requires /dev/uinput access (run with sudo)"]
 fn test_mouse_button_hold_state() {
     let mut ctl = InputCtl::new().expect("failed to create device");
-    assert!(!ctl.is_mouse_button_held(MouseButton::Left), "button should not be held initially");
+    assert!(
+        !ctl.is_mouse_button_held(MouseButton::Left),
+        "button should not be held initially"
+    );
 
-    ctl.mouse_down(MouseButton::Left).expect("should press button down");
-    assert!(ctl.is_mouse_button_held(MouseButton::Left), "button should be held after mouse_down");
+    ctl.mouse_down(MouseButton::Left)
+        .expect("should press button down");
+    assert!(
+        ctl.is_mouse_button_held(MouseButton::Left),
+        "button should be held after mouse_down"
+    );
 
-    ctl.mouse_up(MouseButton::Left).expect("should release button");
-    assert!(!ctl.is_mouse_button_held(MouseButton::Left), "button should not be held after mouse_up");
+    ctl.mouse_up(MouseButton::Left)
+        .expect("should release button");
+    assert!(
+        !ctl.is_mouse_button_held(MouseButton::Left),
+        "button should not be held after mouse_up"
+    );
 }
 
 #[test]
@@ -109,9 +145,11 @@ fn test_release_all() {
     let mut ctl = InputCtl::new().expect("failed to create device");
 
     // Hold multiple keys and buttons
-    ctl.key_down(Key::KEY_LEFTSHIFT).expect("should press shift");
+    ctl.key_down(Key::KEY_LEFTSHIFT)
+        .expect("should press shift");
     ctl.key_down(Key::KEY_LEFTCTRL).expect("should press ctrl");
-    ctl.mouse_down(MouseButton::Left).expect("should press left button");
+    ctl.mouse_down(MouseButton::Left)
+        .expect("should press left button");
 
     assert_eq!(ctl.get_held_keys().len(), 2, "should have 2 held keys");
     assert_eq!(ctl.get_held_buttons().len(), 1, "should have 1 held button");
@@ -119,11 +157,24 @@ fn test_release_all() {
     // Release all
     ctl.release_all().expect("should release all");
 
-    assert!(!ctl.is_key_held(Key::KEY_LEFTSHIFT), "shift should not be held");
-    assert!(!ctl.is_key_held(Key::KEY_LEFTCTRL), "ctrl should not be held");
-    assert!(!ctl.is_mouse_button_held(MouseButton::Left), "left button should not be held");
+    assert!(
+        !ctl.is_key_held(Key::KEY_LEFTSHIFT),
+        "shift should not be held"
+    );
+    assert!(
+        !ctl.is_key_held(Key::KEY_LEFTCTRL),
+        "ctrl should not be held"
+    );
+    assert!(
+        !ctl.is_mouse_button_held(MouseButton::Left),
+        "left button should not be held"
+    );
     assert_eq!(ctl.get_held_keys().len(), 0, "should have no held keys");
-    assert_eq!(ctl.get_held_buttons().len(), 0, "should have no held buttons");
+    assert_eq!(
+        ctl.get_held_buttons().len(),
+        0,
+        "should have no held buttons"
+    );
 }
 
 #[test]
@@ -132,8 +183,10 @@ fn test_idempotent_key_down() {
     let mut ctl = InputCtl::new().expect("failed to create device");
 
     // Press the same key twice
-    ctl.key_down(Key::KEY_A).expect("first key_down should succeed");
-    ctl.key_down(Key::KEY_A).expect("second key_down should not error");
+    ctl.key_down(Key::KEY_A)
+        .expect("first key_down should succeed");
+    ctl.key_down(Key::KEY_A)
+        .expect("second key_down should not error");
 
     assert_eq!(ctl.get_held_keys().len(), 1, "should only track key once");
     assert!(ctl.is_key_held(Key::KEY_A), "key should still be held");
@@ -146,7 +199,8 @@ fn test_idempotent_key_up() {
 
     ctl.key_down(Key::KEY_A).expect("should press key");
     ctl.key_up(Key::KEY_A).expect("first key_up should succeed");
-    ctl.key_up(Key::KEY_A).expect("second key_up should not error");
+    ctl.key_up(Key::KEY_A)
+        .expect("second key_up should not error");
 
     assert!(!ctl.is_key_held(Key::KEY_A), "key should not be held");
 }
@@ -156,17 +210,24 @@ fn test_idempotent_key_up() {
 fn test_get_held_keys() {
     let mut ctl = InputCtl::new().expect("failed to create device");
 
-    assert!(ctl.get_held_keys().is_empty(), "should start with no held keys");
+    assert!(
+        ctl.get_held_keys().is_empty(),
+        "should start with no held keys"
+    );
 
     ctl.key_down(Key::KEY_A).expect("should press A");
     ctl.key_down(Key::KEY_B).expect("should press B");
-    ctl.key_down(Key::KEY_LEFTSHIFT).expect("should press shift");
+    ctl.key_down(Key::KEY_LEFTSHIFT)
+        .expect("should press shift");
 
     let held = ctl.get_held_keys();
     assert_eq!(held.len(), 3, "should have 3 held keys");
     assert!(held.contains(&Key::KEY_A), "should contain KEY_A");
     assert!(held.contains(&Key::KEY_B), "should contain KEY_B");
-    assert!(held.contains(&Key::KEY_LEFTSHIFT), "should contain KEY_LEFTSHIFT");
+    assert!(
+        held.contains(&Key::KEY_LEFTSHIFT),
+        "should contain KEY_LEFTSHIFT"
+    );
 }
 
 #[test]
@@ -174,10 +235,15 @@ fn test_get_held_keys() {
 fn test_get_held_buttons() {
     let mut ctl = InputCtl::new().expect("failed to create device");
 
-    assert!(ctl.get_held_buttons().is_empty(), "should start with no held buttons");
+    assert!(
+        ctl.get_held_buttons().is_empty(),
+        "should start with no held buttons"
+    );
 
-    ctl.mouse_down(MouseButton::Left).expect("should press left");
-    ctl.mouse_down(MouseButton::Right).expect("should press right");
+    ctl.mouse_down(MouseButton::Left)
+        .expect("should press left");
+    ctl.mouse_down(MouseButton::Right)
+        .expect("should press right");
 
     let held = ctl.get_held_buttons();
     assert_eq!(held.len(), 2, "should have 2 held buttons");
@@ -194,7 +260,10 @@ fn test_mouse_movement_accuracy() {
 
     // Get initial cursor position
     let pos_before = find_cursor().expect("Failed to get initial cursor position");
-    println!("Initial cursor position: ({}, {})", pos_before.x, pos_before.y);
+    println!(
+        "Initial cursor position: ({}, {})",
+        pos_before.x, pos_before.y
+    );
 
     // Create inputctl device
     let mut ctl = InputCtl::new().expect("Failed to create input device");
@@ -241,12 +310,24 @@ fn test_mouse_movement_accuracy() {
         println!("  Error:     ({}, {})", error_x, error_y);
 
         // Calculate scaling factors
-        let scale_x = if dx != 0 { actual_dx as f64 / dx as f64 } else { 1.0 };
-        let scale_y = if dy != 0 { actual_dy as f64 / dy as f64 } else { 1.0 };
+        let scale_x = if dx != 0 {
+            actual_dx as f64 / dx as f64
+        } else {
+            1.0
+        };
+        let scale_y = if dy != 0 {
+            actual_dy as f64 / dy as f64
+        } else {
+            1.0
+        };
         if dx != 0 || dy != 0 {
             println!("  Scale:     ({:.4}, {:.4})", scale_x, scale_y);
-            if dx != 0 { scale_factors.push(scale_x); }
-            if dy != 0 { scale_factors.push(scale_y); }
+            if dx != 0 {
+                scale_factors.push(scale_x);
+            }
+            if dy != 0 {
+                scale_factors.push(scale_y);
+            }
         }
 
         // Check if error is within tolerance
@@ -273,7 +354,10 @@ fn test_mouse_movement_accuracy() {
         for failure in &failures {
             println!("  {}", failure);
         }
-        panic!("\n{} test cases failed. See scaling analysis above.", failures.len());
+        panic!(
+            "\n{} test cases failed. See scaling analysis above.",
+            failures.len()
+        );
     }
 
     println!("\n=== All movement tests passed! ===\n");
@@ -288,7 +372,10 @@ fn test_smooth_mouse_movement_accuracy() {
 
     // Get initial cursor position
     let pos_before = find_cursor().expect("Failed to get initial cursor position");
-    println!("Initial cursor position: ({}, {})", pos_before.x, pos_before.y);
+    println!(
+        "Initial cursor position: ({}, {})",
+        pos_before.x, pos_before.y
+    );
 
     // Create inputctl device
     let mut ctl = InputCtl::new().expect("Failed to create input device");
@@ -296,9 +383,30 @@ fn test_smooth_mouse_movement_accuracy() {
     // Test cases: (dx, dy, duration, curve, noise, description)
     let test_cases = vec![
         (200, 0, 0.5, Curve::Linear, 0.0, "right 200px (no noise)"),
-        (0, 200, 0.5, Curve::EaseInOut, 0.0, "down 200px (no noise, ease)"),
-        (-200, 0, 0.5, Curve::Linear, 2.0, "left 200px (default noise)"),
-        (0, -200, 0.5, Curve::EaseInOut, 2.0, "up 200px (default noise, ease)"),
+        (
+            0,
+            200,
+            0.5,
+            Curve::EaseInOut,
+            0.0,
+            "down 200px (no noise, ease)",
+        ),
+        (
+            -200,
+            0,
+            0.5,
+            Curve::Linear,
+            2.0,
+            "left 200px (default noise)",
+        ),
+        (
+            0,
+            -200,
+            0.5,
+            Curve::EaseInOut,
+            2.0,
+            "up 200px (default noise, ease)",
+        ),
     ];
 
     let mut failures = Vec::new();
@@ -330,12 +438,16 @@ fn test_smooth_mouse_movement_accuracy() {
         println!("  Actual:    ({}, {})", actual_dx, actual_dy);
 
         // Calculate error
-        let error_x = actual_dx - dx;  // Keep sign to see if it's over/under
+        let error_x = actual_dx - dx; // Keep sign to see if it's over/under
         let error_y = actual_dy - dy;
         println!("  Error:     ({}, {}) [+/-]", error_x, error_y);
 
-        if dx != 0 { errors_x.push(error_x); }
-        if dy != 0 { errors_y.push(error_y); }
+        if dx != 0 {
+            errors_x.push(error_x);
+        }
+        if dy != 0 {
+            errors_y.push(error_y);
+        }
 
         // Check if error is within tolerance
         let max_error = 3;
@@ -368,11 +480,23 @@ fn test_smooth_mouse_movement_accuracy() {
         let error_x = actual_dx - dx;
         let error_y = actual_dy - dy;
 
-        println!("Random #{}: req=({}, {}), actual=({}, {}), error=({}, {})",
-            i+1, dx, dy, actual_dx, actual_dy, error_x, error_y);
+        println!(
+            "Random #{}: req=({}, {}), actual=({}, {}), error=({}, {})",
+            i + 1,
+            dx,
+            dy,
+            actual_dx,
+            actual_dy,
+            error_x,
+            error_y
+        );
 
-        if dx != 0 { errors_x.push(error_x); }
-        if dy != 0 { errors_y.push(error_y); }
+        if dx != 0 {
+            errors_x.push(error_x);
+        }
+        if dy != 0 {
+            errors_y.push(error_y);
+        }
     }
 
     // Analyze error patterns
@@ -381,14 +505,20 @@ fn test_smooth_mouse_movement_accuracy() {
         let avg_x: f64 = errors_x.iter().map(|&e| e as f64).sum::<f64>() / errors_x.len() as f64;
         let min_x = errors_x.iter().min().unwrap();
         let max_x = errors_x.iter().max().unwrap();
-        println!("X-axis errors: min={}, max={}, avg={:.2}", min_x, max_x, avg_x);
+        println!(
+            "X-axis errors: min={}, max={}, avg={:.2}",
+            min_x, max_x, avg_x
+        );
         println!("All X errors: {:?}", errors_x);
     }
     if !errors_y.is_empty() {
         let avg_y: f64 = errors_y.iter().map(|&e| e as f64).sum::<f64>() / errors_y.len() as f64;
         let min_y = errors_y.iter().min().unwrap();
         let max_y = errors_y.iter().max().unwrap();
-        println!("Y-axis errors: min={}, max={}, avg={:.2}", min_y, max_y, avg_y);
+        println!(
+            "Y-axis errors: min={}, max={}, avg={:.2}",
+            min_y, max_y, avg_y
+        );
         println!("All Y errors: {:?}", errors_y);
     }
 
@@ -397,7 +527,10 @@ fn test_smooth_mouse_movement_accuracy() {
         for failure in &failures {
             println!("  {}", failure);
         }
-        panic!("\n{} test cases failed. See error analysis above.", failures.len());
+        panic!(
+            "\n{} test cases failed. See error analysis above.",
+            failures.len()
+        );
     }
 
     println!("\n=== All smooth movement tests passed! ===\n");

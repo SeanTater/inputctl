@@ -67,7 +67,12 @@ pub fn run_daemon(state: Arc<CursorState>, pid: u32) -> Result<(), DaemonError> 
         .map_err(|e| DaemonError::Dbus(format!("Failed to create session builder: {}", e)))?
         .name(well_known_name)
         .map_err(|e| DaemonError::Dbus(format!("Failed to register name {}: {}", service_name, e)))?
-        .serve_at("/Cursor", CursorService { state: state.clone() })
+        .serve_at(
+            "/Cursor",
+            CursorService {
+                state: state.clone(),
+            },
+        )
         .map_err(|e| DaemonError::Dbus(format!("Failed to serve interface: {}", e)))?
         .build()
         .map_err(|e| DaemonError::Dbus(format!("Failed to build connection: {}", e)))?;
@@ -88,10 +93,7 @@ pub fn run_daemon(state: Arc<CursorState>, pid: u32) -> Result<(), DaemonError> 
 }
 
 /// Load the KWin cursor tracking script
-fn load_kwin_script(
-    conn: &zbus::blocking::Connection,
-    pid: u32,
-) -> Result<i32, DaemonError> {
+fn load_kwin_script(conn: &zbus::blocking::Connection, pid: u32) -> Result<i32, DaemonError> {
     // Create script content that calls our DBus service on cursor changes
     let script = format!(
         r#"
@@ -112,13 +114,9 @@ callDBus(service, "/Cursor", "org.inputctl.Cursor", "Update", pos.x, pos.y);
     std::fs::write(&script_path, &script)?;
 
     // Load via KWin DBus
-    let proxy = zbus::blocking::Proxy::new(
-        conn,
-        "org.kde.KWin",
-        "/Scripting",
-        "org.kde.kwin.Scripting",
-    )
-    .map_err(|e| DaemonError::Dbus(format!("KWin Scripting interface not found: {}", e)))?;
+    let proxy =
+        zbus::blocking::Proxy::new(conn, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting")
+            .map_err(|e| DaemonError::Dbus(format!("KWin Scripting interface not found: {}", e)))?;
 
     let script_id: i32 = proxy
         .call_method("loadScript", &(&script_path,))

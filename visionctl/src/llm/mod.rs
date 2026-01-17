@@ -7,5 +7,7 @@
 pub mod client;
 pub mod tools;
 
-pub use client::{LlmConfig, LlmClient, Message};
-pub use tools::{ToolDefinition, get_tool_definitions, get_action_tools, execute_tool, parse_coordinates};
+pub use client::{LlmClient, LlmConfig, Message};
+pub use tools::{
+    execute_tool, get_action_tools, get_tool_definitions, parse_coordinates, ToolDefinition,
+};

@@ -7,20 +7,22 @@
 //! - `GET /api/state`: Returns the full current [`AgentState`] as JSON.
 //! - `GET /ws`: A WebSocket endpoint that streams [`AgentState`] updates in real-time.
 
-use axum::{
-    routing::{get, post},
-    Router,
-    Json,
-    extract::{State, ws::{WebSocketUpgrade, WebSocket}},
-    response::{IntoResponse, Response},
-    http::{header, StatusCode, Uri},
-};
-use std::sync::Arc;
-use crate::debugger::{StateStore, AgentState};
+use crate::debugger::{AgentState, StateStore};
 use crate::llm::Message;
+use axum::{
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        State,
+    },
+    http::{header, StatusCode, Uri},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use rust_embed::RustEmbed;
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::info;
-use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
 #[folder = "ui/dist/"]
@@ -112,27 +114,32 @@ async fn inject_message(
     StatusCode::OK
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.state_store.subscribe();
-    
+
     // Send initial state
     let initial = state.state_store.get_state();
     if let Ok(msg) = serde_json::to_string(&initial) {
-        if socket.send(axum::extract::ws::Message::Text(msg.into())).await.is_err() {
+        if socket
+            .send(axum::extract::ws::Message::Text(msg.into()))
+            .await
+            .is_err()
+        {
             return;
         }
     }
 
     while let Ok(update) = rx.recv().await {
         if let Ok(msg) = serde_json::to_string(&update) {
-            if socket.send(axum::extract::ws::Message::Text(msg.into())).await.is_err() {
+            if socket
+                .send(axum::extract::ws::Message::Text(msg.into()))
+                .await
+                .is_err()
+            {
                 break;
             }
         }

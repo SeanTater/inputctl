@@ -8,12 +8,12 @@
 //! keeps the full history of a run in memory and can notify subscribers (like a web server)
 //! of changes in real-time.
 
-use serde::{Serialize, Deserialize};
-use std::sync::Mutex;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use tokio::sync::broadcast;
 use crate::llm::{Message, ToolDefinition};
 use crate::primitives::Region;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use tokio::sync::broadcast;
 
 /// Represents the overall state of an agent session
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -68,7 +68,9 @@ pub trait AgentObserver: Send + Sync {
 
     /// New: Control methods
     fn wait_if_paused(&self) {}
-    fn get_injected_messages(&self) -> Vec<Message> { Vec::new() }
+    fn get_injected_messages(&self) -> Vec<Message> {
+        Vec::new()
+    }
 }
 
 /// Default observer that does nothing
@@ -108,7 +110,8 @@ impl StateStore {
     }
 
     pub fn set_paused(&self, paused: bool) {
-        self.paused.store(paused, std::sync::atomic::Ordering::SeqCst);
+        self.paused
+            .store(paused, std::sync::atomic::Ordering::SeqCst);
         if !paused {
             self.pause_cond.notify_all();
         }
@@ -209,7 +212,11 @@ impl AgentObserver for StateStore {
 
     fn on_task_complete(&self, success: bool, _message: &str) {
         let mut state = self.state.lock().unwrap();
-        state.status = if success { "Success".to_string() } else { "Failed".to_string() };
+        state.status = if success {
+            "Success".to_string()
+        } else {
+            "Failed".to_string()
+        };
         drop(state);
         self.notify();
     }

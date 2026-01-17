@@ -24,13 +24,17 @@ pub fn draw_cursor_mark(image: &mut RgbaImage, pos: &CursorPos) {
         let px = x.saturating_sub(size / 2).saturating_add(dx);
         for t in 0..thickness {
             // White outline (above and below)
-            if let Some(pixel) = image.get_pixel_mut_checked(px, y.saturating_sub(thickness / 2 + 1).saturating_add(t)) {
+            if let Some(pixel) = image
+                .get_pixel_mut_checked(px, y.saturating_sub(thickness / 2 + 1).saturating_add(t))
+            {
                 if t == 0 || t == thickness - 1 {
                     *pixel = outline_color;
                 }
             }
             // Red center
-            if let Some(pixel) = image.get_pixel_mut_checked(px, y.saturating_sub(thickness / 2).saturating_add(t)) {
+            if let Some(pixel) =
+                image.get_pixel_mut_checked(px, y.saturating_sub(thickness / 2).saturating_add(t))
+            {
                 *pixel = mark_color;
             }
         }
@@ -41,13 +45,17 @@ pub fn draw_cursor_mark(image: &mut RgbaImage, pos: &CursorPos) {
         let py = y.saturating_sub(size / 2).saturating_add(dy);
         for t in 0..thickness {
             // White outline (left and right)
-            if let Some(pixel) = image.get_pixel_mut_checked(x.saturating_sub(thickness / 2 + 1).saturating_add(t), py) {
+            if let Some(pixel) = image
+                .get_pixel_mut_checked(x.saturating_sub(thickness / 2 + 1).saturating_add(t), py)
+            {
                 if t == 0 || t == thickness - 1 {
                     *pixel = outline_color;
                 }
             }
             // Red center
-            if let Some(pixel) = image.get_pixel_mut_checked(x.saturating_sub(thickness / 2).saturating_add(t), py) {
+            if let Some(pixel) =
+                image.get_pixel_mut_checked(x.saturating_sub(thickness / 2).saturating_add(t), py)
+            {
                 *pixel = mark_color;
             }
         }

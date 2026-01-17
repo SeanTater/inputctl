@@ -3,11 +3,11 @@ use dialoguer::{Input, Select};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::process::Command;
-use tracing::{info, debug, warn, error};
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
-use visionctl::{Agent, Config, LlmConfig, VisionCtl, Region};
+use visionctl::{Agent, Config, LlmConfig, Region, VisionCtl};
 
 #[derive(Parser)]
 #[command(name = "visionctl")]
@@ -91,6 +91,28 @@ enum Commands {
     /// Run interactive configuration wizard
     /// Run interactive configuration wizard
     Setup,
+    /// Record supervised gameplay data
+    Record {
+        /// Output directory for the dataset
+        #[arg(short, long, default_value = "dataset")]
+        output: PathBuf,
+
+        /// Target recording FPS
+        #[arg(long, default_value_t = 10)]
+        fps: u64,
+
+        /// Input device path (optional, will prompt if not provided)
+        #[arg(long)]
+        device: Option<String>,
+
+        /// Limit recording to a specific window (by title substring)
+        #[arg(long)]
+        window: Option<String>,
+
+        /// Limit recording to a specific region (x,y,w,h)
+        #[arg(long, value_parser = parse_region)]
+        region: Option<Region>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -108,7 +130,12 @@ fn parse_region(s: &str) -> Result<Region, String> {
     let y = parts[1].parse().map_err(|_| "Invalid y".to_string())?;
     let w = parts[2].parse().map_err(|_| "Invalid w".to_string())?;
     let h = parts[3].parse().map_err(|_| "Invalid h".to_string())?;
-    Ok(Region { x, y, width: w, height: h })
+    Ok(Region {
+        x,
+        y,
+        width: w,
+        height: h,
+    })
 }
 
 fn init_logging(verbose: u8, quiet: bool) {
@@ -139,7 +166,23 @@ async fn main() -> visionctl::Result<()> {
     init_logging(cli.verbose, cli.quiet);
 
     match cli.command {
-        Some(Commands::Agent { goal, window, region, blind, no_vision_tools, debug, max_iterations }) => run_agent(&goal, window, region, blind, no_vision_tools, debug, max_iterations),
+        Some(Commands::Agent {
+            goal,
+            window,
+            region,
+            blind,
+            no_vision_tools,
+            debug,
+            max_iterations,
+        }) => run_agent(
+            &goal,
+            window,
+            region,
+            blind,
+            no_vision_tools,
+            debug,
+            max_iterations,
+        ),
         Some(Commands::Window { command }) => match command {
             WindowCommands::List => run_list_windows(),
         },
@@ -155,6 +198,13 @@ async fn main() -> visionctl::Result<()> {
         }) => run_click_template(&template, threshold),
         Some(Commands::InstallDesktopFile) => install_desktop_file(),
         Some(Commands::Setup) => run_setup(),
+        Some(Commands::Record {
+            output,
+            fps,
+            device,
+            window,
+            region,
+        }) => visionctl::recorder::run_recorder(output, fps, device, window, region),
         None => {
             // Default: query LLM with question
             let question = if cli.question.is_empty() {
@@ -184,7 +234,7 @@ fn get_llm_config() -> visionctl::Result<LlmConfig> {
 
     // Priority: env vars > config file > defaults
     let mut settings = file_config.llm;
-    
+
     if let Ok(backend) = std::env::var("VISIONCTL_BACKEND") {
         settings.backend = backend;
     }
@@ -213,8 +263,9 @@ fn run_query(question: &str) -> visionctl::Result<()> {
     // Capture screenshot with cursor marker and save for debugging
     let screenshot = ctl.screenshot_with_cursor()?;
     let screenshot_path = "/tmp/visionctl_last_screenshot.png";
-    fs::write(screenshot_path, &screenshot)
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
+    fs::write(screenshot_path, &screenshot).map_err(|e| {
+        visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e))
+    })?;
     debug!(path = %screenshot_path, "Screenshot saved");
 
     let answer = ctl.ask(question)?;
@@ -229,11 +280,23 @@ fn run_query(question: &str) -> visionctl::Result<()> {
     Ok(())
 }
 
-fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Region>, blind_mode: bool, no_vision_tools: bool, debug_mode: bool, max_iterations: usize) -> visionctl::Result<()> {
+fn run_agent(
+    goal: &str,
+    window_filter: Option<String>,
+    region_filter: Option<Region>,
+    blind_mode: bool,
+    no_vision_tools: bool,
+    debug_mode: bool,
+    max_iterations: usize,
+) -> visionctl::Result<()> {
     info!(goal = %goal, "Starting agent");
 
     let main_config = get_llm_config()?;
-    let iter_limit = if max_iterations == 0 { None } else { Some(max_iterations) };
+    let iter_limit = if max_iterations == 0 {
+        None
+    } else {
+        Some(max_iterations)
+    };
     let mut agent = Agent::new(main_config)?
         .with_max_iterations(iter_limit)
         .with_verbose(true)
@@ -244,7 +307,7 @@ fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Re
         // Start the in-memory state store to track agent events
         let state_store = Arc::new(visionctl::debugger::StateStore::new());
         let server_store = state_store.clone();
-        
+
         // Spawn the Axum web server in a background task
         tokio::spawn(async move {
             let server = visionctl::server::DebugServer::new(server_store);
@@ -252,7 +315,7 @@ fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Re
                 error!("Debugger server failed: {}", e);
             }
         });
-        
+
         // Attach the observer to the agent
         agent = agent.with_observer(state_store);
         eprintln!("Debugger running at http://localhost:10888");
@@ -260,14 +323,17 @@ fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Re
 
     // Apply viewport filters
     if let Some(name) = window_filter {
-         info!("Looking for window matching '{}'", name);
-         if let Some(win) = visionctl::find_window(&name)? {
-             info!(title = %win.title, region = ?win.region, "Found window, restricting viewport");
-             agent.ctl_mut().set_viewport(Some(win.region));
-         } else {
-             error!("Window matching '{}' not found", name);
-             return Err(visionctl::Error::ScreenshotFailed(format!("Window '{}' not found", name)));
-         }
+        info!("Looking for window matching '{}'", name);
+        if let Some(win) = visionctl::find_window(&name)? {
+            info!(title = %win.title, region = ?win.region, "Found window, restricting viewport");
+            agent.ctl_mut().set_viewport(Some(win.region));
+        } else {
+            error!("Window matching '{}' not found", name);
+            return Err(visionctl::Error::ScreenshotFailed(format!(
+                "Window '{}' not found",
+                name
+            )));
+        }
     } else if let Some(region) = region_filter {
         info!(region = ?region, "Restricting viewport to region");
         agent.ctl_mut().set_viewport(Some(region));
@@ -316,8 +382,9 @@ fn run_agent(goal: &str, window_filter: Option<String>, region_filter: Option<Re
 
 fn run_screenshot(output_path: &str) -> visionctl::Result<()> {
     let screenshot = VisionCtl::screenshot()?;
-    fs::write(output_path, &screenshot)
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
+    fs::write(output_path, &screenshot).map_err(|e| {
+        visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e))
+    })?;
     info!(
         path = %output_path,
         bytes = screenshot.len(),
@@ -337,8 +404,9 @@ fn run_find_template(
     } else {
         let screenshot_path = "/tmp/visionctl_detect.png";
         let screenshot_data = VisionCtl::screenshot()?;
-        fs::write(screenshot_path, &screenshot_data)
-            .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
+        fs::write(screenshot_path, &screenshot_data).map_err(|e| {
+            visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e))
+        })?;
         debug!(path = %screenshot_path, "Screenshot saved");
         screenshot_path.to_string()
     };
@@ -372,8 +440,9 @@ fn run_click_template(template: &str, threshold: f32) -> visionctl::Result<()> {
     // Take screenshot
     let screenshot_path = "/tmp/visionctl_click_detect.png";
     let screenshot_data = VisionCtl::screenshot()?;
-    fs::write(screenshot_path, &screenshot_data)
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e)))?;
+    fs::write(screenshot_path, &screenshot_data).map_err(|e| {
+        visionctl::Error::ScreenshotFailed(format!("Failed to save screenshot: {}", e))
+    })?;
 
     info!(template = %template, threshold = threshold, "Finding template to click");
 
@@ -398,7 +467,9 @@ fn run_click_template(template: &str, threshold: f32) -> visionctl::Result<()> {
     let status = Command::new("inputctl")
         .args(["click", &best.x.to_string(), &best.y.to_string()])
         .status()
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to run inputctl: {}", e)))?;
+        .map_err(|e| {
+            visionctl::Error::ScreenshotFailed(format!("Failed to run inputctl: {}", e))
+        })?;
 
     if !status.success() {
         return Err(visionctl::Error::ScreenshotFailed(
@@ -417,9 +488,12 @@ fn run_list_windows() -> visionctl::Result<()> {
         return Ok(());
     }
 
-    println!("{:<10} {:<10} {:<10} {:<10} {:<10} {}", "ID", "X", "Y", "Width", "Height", "Title");
+    println!(
+        "{:<10} {:<10} {:<10} {:<10} {:<10} {}",
+        "ID", "X", "Y", "Width", "Height", "Title"
+    );
     println!("{}", "-".repeat(80));
-    
+
     for w in windows {
         println!(
             "{:<10} {:<10} {:<10} {:<10} {:<10} {}",
@@ -438,8 +512,9 @@ fn install_desktop_file() -> visionctl::Result<()> {
     println!("=== VisionCtl Desktop File Installer ===\n");
 
     // Get the current executable path
-    let exe_path = std::env::current_exe()
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to get executable path: {}", e)))?;
+    let exe_path = std::env::current_exe().map_err(|e| {
+        visionctl::Error::ScreenshotFailed(format!("Failed to get executable path: {}", e))
+    })?;
 
     let exe_path_str = exe_path
         .to_str()
@@ -448,14 +523,16 @@ fn install_desktop_file() -> visionctl::Result<()> {
     println!("Detected executable: {}", exe_path_str);
 
     // Get desktop file path
-    let home = std::env::var("HOME")
-        .map_err(|_| visionctl::Error::ScreenshotFailed("HOME environment variable not set".to_string()))?;
+    let home = std::env::var("HOME").map_err(|_| {
+        visionctl::Error::ScreenshotFailed("HOME environment variable not set".to_string())
+    })?;
 
     let desktop_dir = PathBuf::from(home).join(".local/share/applications");
 
     // Create directory if it doesn't exist
-    fs::create_dir_all(&desktop_dir)
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to create desktop directory: {}", e)))?;
+    fs::create_dir_all(&desktop_dir).map_err(|e| {
+        visionctl::Error::ScreenshotFailed(format!("Failed to create desktop directory: {}", e))
+    })?;
 
     let desktop_file_path = desktop_dir.join("visionctl.desktop");
 
@@ -493,8 +570,9 @@ X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
     }
 
     // Write desktop file
-    fs::write(&desktop_file_path, desktop_content)
-        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to write desktop file: {}", e)))?;
+    fs::write(&desktop_file_path, desktop_content).map_err(|e| {
+        visionctl::Error::ScreenshotFailed(format!("Failed to write desktop file: {}", e))
+    })?;
 
     println!("Desktop file created successfully!");
 
@@ -563,11 +641,13 @@ fn run_setup() -> visionctl::Result<()> {
 
     let url: String = Input::new()
         .with_prompt("Base URL")
-        .default(if config.llm.base_url != default_url && !config.llm.base_url.is_empty() {
-            config.llm.base_url.clone()
-        } else {
-            default_url
-        })
+        .default(
+            if config.llm.base_url != default_url && !config.llm.base_url.is_empty() {
+                config.llm.base_url.clone()
+            } else {
+                default_url
+            },
+        )
         .interact_text()
         .unwrap();
     config.llm.base_url = url;
@@ -581,11 +661,13 @@ fn run_setup() -> visionctl::Result<()> {
 
     let model: String = Input::new()
         .with_prompt("Model name")
-        .default(if config.llm.model != default_model && !config.llm.model.is_empty() {
-            config.llm.model.clone()
-        } else {
-            default_model
-        })
+        .default(
+            if config.llm.model != default_model && !config.llm.model.is_empty() {
+                config.llm.model.clone()
+            } else {
+                default_model
+            },
+        )
         .interact_text()
         .unwrap();
     config.llm.model = model;
@@ -598,7 +680,11 @@ fn run_setup() -> visionctl::Result<()> {
             .allow_empty(true)
             .interact_text()
             .unwrap();
-        config.llm.api_key = if api_key.is_empty() { None } else { Some(api_key) };
+        config.llm.api_key = if api_key.is_empty() {
+            None
+        } else {
+            Some(api_key)
+        };
     }
 
     // Cursor FPS
@@ -620,9 +706,9 @@ fn run_setup() -> visionctl::Result<()> {
     println!("Smooth FPS: {}", config.cursor.smooth_fps);
     println!();
 
-    config.save().map_err(|e| {
-        visionctl::Error::ScreenshotFailed(format!("Failed to save config: {}", e))
-    })?;
+    config
+        .save()
+        .map_err(|e| visionctl::Error::ScreenshotFailed(format!("Failed to save config: {}", e)))?;
 
     println!("Configuration saved to: {}", Config::path().display());
     println!("\nYou can edit this file manually or run 'visionctl setup' again.");

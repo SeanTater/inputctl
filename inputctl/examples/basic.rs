@@ -1,4 +1,4 @@
-use inputctl::{MouseButton, InputCtl};
+use inputctl::{InputCtl, MouseButton};
 
 fn main() -> inputctl::Result<()> {
     // Create device (takes ~1 second for kernel initialization)

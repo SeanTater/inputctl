@@ -54,8 +54,10 @@ fn main() {
     println!("P99:    {:.0} ns ({:.3} μs)", p99, p99 / 1000.0);
 
     let target_ns = 10_000.0; // 10μs target
-    println!("\nFast enough for servo control (<10μs)? {}",
-             if p95 < target_ns { "YES ✓" } else { "NO ✗" });
+    println!(
+        "\nFast enough for servo control (<10μs)? {}",
+        if p95 < target_ns { "YES ✓" } else { "NO ✗" }
+    );
 
     // Show distribution
     println!("\n=== Latency Distribution ===");

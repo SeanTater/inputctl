@@ -13,9 +13,26 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub enum LlmConfig {
-    Ollama { url: String, model: String, temperature: f32, repetition_penalty: Option<f32> },
-    Vllm { url: String, model: String, api_key: Option<String>, temperature: f32, repetition_penalty: Option<f32> },
-    OpenAI { url: String, model: String, api_key: String, temperature: f32, repetition_penalty: Option<f32> },
+    Ollama {
+        url: String,
+        model: String,
+        temperature: f32,
+        repetition_penalty: Option<f32>,
+    },
+    Vllm {
+        url: String,
+        model: String,
+        api_key: Option<String>,
+        temperature: f32,
+        repetition_penalty: Option<f32>,
+    },
+    OpenAI {
+        url: String,
+        model: String,
+        api_key: String,
+        temperature: f32,
+        repetition_penalty: Option<f32>,
+    },
 }
 
 /// Message in a conversation
@@ -69,25 +86,56 @@ impl LlmClient {
             .build()
             .map_err(|e| Error::LlmApiError(format!("Failed to create HTTP client: {}", e)))?;
 
-        Ok(Self {
-            client,
-            config,
-        })
+        Ok(Self { client, config })
     }
 
     pub fn query(&self, image_bytes: &[u8], prompt: &str) -> Result<String> {
         let image_base64 = general_purpose::STANDARD.encode(image_bytes);
 
         match &self.config {
-            LlmConfig::Ollama { url, model, temperature, repetition_penalty } => {
-                self.query_ollama(url, model, &image_base64, prompt, *temperature, *repetition_penalty)
-            }
-            LlmConfig::Vllm { url, model, api_key, temperature, repetition_penalty } => {
-                self.query_openai_compatible(url, model, api_key.as_deref(), &image_base64, prompt, *temperature, *repetition_penalty)
-            }
-            LlmConfig::OpenAI { url, model, api_key, temperature, repetition_penalty } => {
-                self.query_openai_compatible(url, model, Some(api_key.as_str()), &image_base64, prompt, *temperature, *repetition_penalty)
-            }
+            LlmConfig::Ollama {
+                url,
+                model,
+                temperature,
+                repetition_penalty,
+            } => self.query_ollama(
+                url,
+                model,
+                &image_base64,
+                prompt,
+                *temperature,
+                *repetition_penalty,
+            ),
+            LlmConfig::Vllm {
+                url,
+                model,
+                api_key,
+                temperature,
+                repetition_penalty,
+            } => self.query_openai_compatible(
+                url,
+                model,
+                api_key.as_deref(),
+                &image_base64,
+                prompt,
+                *temperature,
+                *repetition_penalty,
+            ),
+            LlmConfig::OpenAI {
+                url,
+                model,
+                api_key,
+                temperature,
+                repetition_penalty,
+            } => self.query_openai_compatible(
+                url,
+                model,
+                Some(api_key.as_str()),
+                &image_base64,
+                prompt,
+                *temperature,
+                *repetition_penalty,
+            ),
         }
     }
 
@@ -100,15 +148,54 @@ impl LlmClient {
         tool_choice: Option<String>,
     ) -> Result<ChatResponse> {
         match &self.config {
-            LlmConfig::Ollama { url, model, temperature, repetition_penalty } => {
-                self.chat_ollama_with_tools(url, model, messages, tools, image, *temperature, *repetition_penalty)
-            }
-            LlmConfig::Vllm { url, model, api_key, temperature, repetition_penalty } => {
-                self.chat_openai_compatible_with_tools(url, model, api_key.as_deref(), messages, tools, image, tool_choice, *temperature, *repetition_penalty)
-            }
-            LlmConfig::OpenAI { url, model, api_key, temperature, repetition_penalty } => {
-                self.chat_openai_compatible_with_tools(url, model, Some(api_key.as_str()), messages, tools, image, tool_choice, *temperature, *repetition_penalty)
-            }
+            LlmConfig::Ollama {
+                url,
+                model,
+                temperature,
+                repetition_penalty,
+            } => self.chat_ollama_with_tools(
+                url,
+                model,
+                messages,
+                tools,
+                image,
+                *temperature,
+                *repetition_penalty,
+            ),
+            LlmConfig::Vllm {
+                url,
+                model,
+                api_key,
+                temperature,
+                repetition_penalty,
+            } => self.chat_openai_compatible_with_tools(
+                url,
+                model,
+                api_key.as_deref(),
+                messages,
+                tools,
+                image,
+                tool_choice,
+                *temperature,
+                *repetition_penalty,
+            ),
+            LlmConfig::OpenAI {
+                url,
+                model,
+                api_key,
+                temperature,
+                repetition_penalty,
+            } => self.chat_openai_compatible_with_tools(
+                url,
+                model,
+                Some(api_key.as_str()),
+                messages,
+                tools,
+                image,
+                tool_choice,
+                *temperature,
+                *repetition_penalty,
+            ),
         }
     }
 
@@ -125,48 +212,57 @@ impl LlmClient {
         let endpoint = format!("{}/api/chat", url.trim_end_matches('/'));
 
         // Convert tools to Ollama format
-        let ollama_tools: Vec<Value> = tools.iter().map(|t| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.input_schema
-                }
+        let ollama_tools: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         // Build messages array
-        let mut ollama_messages: Vec<Value> = messages.iter().map(|m| {
-            let mut msg = json!({ "role": m.role });
-            if let Some(content) = &m.content {
-                msg["content"] = json!(content);
-            }
-            if let Some(images) = &m.images {
-                msg["images"] = json!(images);
-            }
-            if let Some(tool_calls) = &m.tool_calls {
-                // Include ID in tool calls for Ollama
-                let tc_with_ids: Vec<Value> = tool_calls.iter().map(|tc| {
-                    let mut obj = json!({
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    });
-                    if let Some(id) = &tc.id {
-                        obj["id"] = json!(id);
-                    }
-                    obj
-                }).collect();
-                msg["tool_calls"] = json!(tc_with_ids);
-            }
-            // For tool response messages, include the tool_call_id
-            if let Some(tool_call_id) = &m.tool_call_id {
-                msg["tool_call_id"] = json!(tool_call_id);
-            }
-            msg
-        }).collect();
+        let mut ollama_messages: Vec<Value> = messages
+            .iter()
+            .map(|m| {
+                let mut msg = json!({ "role": m.role });
+                if let Some(content) = &m.content {
+                    msg["content"] = json!(content);
+                }
+                if let Some(images) = &m.images {
+                    msg["images"] = json!(images);
+                }
+                if let Some(tool_calls) = &m.tool_calls {
+                    // Include ID in tool calls for Ollama
+                    let tc_with_ids: Vec<Value> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            let mut obj = json!({
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                }
+                            });
+                            if let Some(id) = &tc.id {
+                                obj["id"] = json!(id);
+                            }
+                            obj
+                        })
+                        .collect();
+                    msg["tool_calls"] = json!(tc_with_ids);
+                }
+                // For tool response messages, include the tool_call_id
+                if let Some(tool_call_id) = &m.tool_call_id {
+                    msg["tool_call_id"] = json!(tool_call_id);
+                }
+                msg
+            })
+            .collect();
 
         // Add image to the last user message if provided
         if let Some(img_bytes) = image {
@@ -185,7 +281,10 @@ impl LlmClient {
         });
 
         if let Some(rp) = repetition_penalty {
-            options.as_object_mut().unwrap().insert("repeat_penalty".to_string(), json!(rp));
+            options
+                .as_object_mut()
+                .unwrap()
+                .insert("repeat_penalty".to_string(), json!(rp));
         }
 
         let body = json!({
@@ -196,49 +295,61 @@ impl LlmClient {
             "options": options
         });
 
-        let response = self.client
-            .post(&endpoint)
-            .json(&body)
-            .send()?;
+        let response = self.client.post(&endpoint).json(&body).send()?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::LlmApiError(format!("Ollama chat API error {}: {}", status, error_text)));
+            let error_text = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::LlmApiError(format!(
+                "Ollama chat API error {}: {}",
+                status, error_text
+            )));
         }
 
         let json: Value = response.json()?;
 
         // Parse the response
-        let message = json.get("message")
+        let message = json
+            .get("message")
             .ok_or_else(|| Error::LlmApiError("No message in Ollama response".to_string()))?;
 
-        let content = message.get("content")
+        let content = message
+            .get("content")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
         // Parse tool calls if present
-        let tool_calls = message.get("tool_calls")
+        let tool_calls = message
+            .get("tool_calls")
             .and_then(|v| v.as_array())
             .map(|arr| {
-                arr.iter().enumerate().filter_map(|(i, tc)| {
-                    let function = tc.get("function")?;
-                    let name = function.get("name")?.as_str()?.to_string();
-                    // Arguments can be a string or object - Ollama returns it as object
-                    let arguments = function.get("arguments").cloned().unwrap_or(json!({}));
-                    // Get ID from response or generate one
-                    let id = tc.get("id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .or_else(|| Some(format!("call_{}", i)));
-                    Some(ToolCall {
-                        id,
-                        function: FunctionCall { name, arguments }
+                arr.iter()
+                    .enumerate()
+                    .filter_map(|(i, tc)| {
+                        let function = tc.get("function")?;
+                        let name = function.get("name")?.as_str()?.to_string();
+                        // Arguments can be a string or object - Ollama returns it as object
+                        let arguments = function.get("arguments").cloned().unwrap_or(json!({}));
+                        // Get ID from response or generate one
+                        let id = tc
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| Some(format!("call_{}", i)));
+                        Some(ToolCall {
+                            id,
+                            function: FunctionCall { name, arguments },
+                        })
                     })
-                }).collect()
+                    .collect()
             });
 
-        Ok(ChatResponse { content, tool_calls })
+        Ok(ChatResponse {
+            content,
+            tool_calls,
+        })
     }
 
     fn chat_openai_compatible_with_tools(
@@ -256,23 +367,26 @@ impl LlmClient {
         let endpoint = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
 
         // Convert tools to OpenAI format
-        let openai_tools: Vec<Value> = tools.iter().map(|t| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.input_schema
-                }
+        let openai_tools: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         // Build messages array - OpenAI format uses content array with text and image_url
         let mut openai_messages: Vec<Value> = Vec::new();
 
         for (i, m) in messages.iter().enumerate() {
-            let is_last_user_msg = m.role == "user" &&
-                messages.iter().skip(i + 1).all(|msg| msg.role != "user");
+            let is_last_user_msg =
+                m.role == "user" && messages.iter().skip(i + 1).all(|msg| msg.role != "user");
 
             // If this is the last user message and we have an image, use multimodal content
             if m.role == "user" && is_last_user_msg && image.is_some() {
@@ -337,11 +451,15 @@ impl LlmClient {
         });
 
         if let Some(rp) = repetition_penalty {
-            body.as_object_mut().unwrap().insert("repetition_penalty".to_string(), json!(rp));
+            body.as_object_mut()
+                .unwrap()
+                .insert("repetition_penalty".to_string(), json!(rp));
         }
 
         if let Some(tc) = tool_choice {
-            body.as_object_mut().unwrap().insert("tool_choice".to_string(), json!(tc));
+            body.as_object_mut()
+                .unwrap()
+                .insert("tool_choice".to_string(), json!(tc));
         }
 
         let mut request = self.client.post(&endpoint).json(&body);
@@ -354,51 +472,75 @@ impl LlmClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::LlmApiError(format!("OpenAI chat API error {}: {}", status, error_text)));
+            let error_text = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::LlmApiError(format!(
+                "OpenAI chat API error {}: {}",
+                status, error_text
+            )));
         }
 
         let json: Value = response.json()?;
 
         // Parse the response - OpenAI format nests message under choices[0]
-        let message = json.get("choices")
+        let message = json
+            .get("choices")
             .and_then(|v| v.get(0))
             .and_then(|v| v.get("message"))
             .ok_or_else(|| Error::LlmApiError("No message in OpenAI response".to_string()))?;
 
-        let content = message.get("content")
+        let content = message
+            .get("content")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
         // Parse tool calls if present
-        let tool_calls = message.get("tool_calls")
+        let tool_calls = message
+            .get("tool_calls")
             .and_then(|v| v.as_array())
             .map(|arr| {
-                arr.iter().enumerate().filter_map(|(i, tc)| {
-                    let function = tc.get("function")?;
-                    let name = function.get("name")?.as_str()?.to_string();
-                    // OpenAI returns arguments as a JSON string, parse it
-                    let arguments = function.get("arguments")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or(json!({}));
-                    // Get ID from response or generate one
-                    let id = tc.get("id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .or_else(|| Some(format!("call_{}", i)));
-                    Some(ToolCall {
-                        id,
-                        function: FunctionCall { name, arguments }
+                arr.iter()
+                    .enumerate()
+                    .filter_map(|(i, tc)| {
+                        let function = tc.get("function")?;
+                        let name = function.get("name")?.as_str()?.to_string();
+                        // OpenAI returns arguments as a JSON string, parse it
+                        let arguments = function
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or(json!({}));
+                        // Get ID from response or generate one
+                        let id = tc
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| Some(format!("call_{}", i)));
+                        Some(ToolCall {
+                            id,
+                            function: FunctionCall { name, arguments },
+                        })
                     })
-                }).collect()
+                    .collect()
             });
 
-        Ok(ChatResponse { content, tool_calls })
+        Ok(ChatResponse {
+            content,
+            tool_calls,
+        })
     }
 
-    fn query_ollama(&self, url: &str, model: &str, image: &str, prompt: &str, temperature: f32, repetition_penalty: Option<f32>) -> Result<String> {
+    fn query_ollama(
+        &self,
+        url: &str,
+        model: &str,
+        image: &str,
+        prompt: &str,
+        temperature: f32,
+        repetition_penalty: Option<f32>,
+    ) -> Result<String> {
         let endpoint = format!("{}/api/generate", url.trim_end_matches('/'));
 
         let mut options = json!({
@@ -406,7 +548,10 @@ impl LlmClient {
         });
 
         if let Some(rp) = repetition_penalty {
-            options.as_object_mut().unwrap().insert("repeat_penalty".to_string(), json!(rp));
+            options
+                .as_object_mut()
+                .unwrap()
+                .insert("repeat_penalty".to_string(), json!(rp));
         }
 
         let body = json!({
@@ -417,15 +562,17 @@ impl LlmClient {
             "options": options
         });
 
-        let response = self.client
-            .post(&endpoint)
-            .json(&body)
-            .send()?;
+        let response = self.client.post(&endpoint).json(&body).send()?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::LlmApiError(format!("Ollama API error {}: {}", status, error_text)));
+            let error_text = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::LlmApiError(format!(
+                "Ollama API error {}: {}",
+                status, error_text
+            )));
         }
 
         let json: Value = response.json()?;
@@ -471,7 +618,9 @@ impl LlmClient {
         });
 
         if let Some(rp) = repetition_penalty {
-            body.as_object_mut().unwrap().insert("repetition_penalty".to_string(), json!(rp));
+            body.as_object_mut()
+                .unwrap()
+                .insert("repetition_penalty".to_string(), json!(rp));
         }
 
         let mut request = self.client.post(&endpoint).json(&body);
@@ -484,8 +633,13 @@ impl LlmClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::LlmApiError(format!("OpenAI API error {}: {}", status, error_text)));
+            let error_text = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::LlmApiError(format!(
+                "OpenAI API error {}: {}",
+                status, error_text
+            )));
         }
 
         let json: Value = response.json()?;

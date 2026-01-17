@@ -2,6 +2,14 @@
 
 Linux input automation library using uinput, with Python bindings.
 
+## Repo layout
+
+- `inputctl/`: input automation library (this README)
+- `visionctl/`: Rust agent system for screen capture + automation
+- `reflex_train/`: training stack for the Reflex Agent (separate Python project)
+- `reflex_infer/`: Rust ONNX inference stub for Reflex Agent exports
+- `docs/decisions.md`: short architecture notes and rationale
+
 Inspired by [ydotool](https://github.com/ReimuNotMoe/ydotool) but designed as a library rather than a CLI tool. Works on X11, Wayland, and headless systems.
 
 ## Features

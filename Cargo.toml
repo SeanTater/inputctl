@@ -1,5 +1,5 @@
 [workspace]
-members = ["inputctl", "visionctl"]
+members = ["inputctl", "visionctl", "reflex_infer"]
 resolver = "2"
 
 [workspace.dependencies]

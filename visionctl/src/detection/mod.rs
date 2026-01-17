@@ -7,11 +7,11 @@
 pub mod templates;
 
 use crate::{Error, Result};
-use image::{GrayImage, imageops};
+use image::{imageops, GrayImage};
 use serde::{Deserialize, Serialize};
 use tracing::trace;
 
-pub use templates::{list_available_templates, find_template_file};
+pub use templates::{find_template_file, list_available_templates};
 
 /// Detection result with location and confidence
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,7 +67,12 @@ pub fn find_template(
     // Downsample for coarse search
     let coarse_w = (screenshot_full.width() as f32 / coarse_scale) as u32;
     let coarse_h = (screenshot_full.height() as f32 / coarse_scale) as u32;
-    let screenshot_coarse = imageops::resize(&screenshot_full, coarse_w, coarse_h, imageops::FilterType::Triangle);
+    let screenshot_coarse = imageops::resize(
+        &screenshot_full,
+        coarse_w,
+        coarse_h,
+        imageops::FilterType::Triangle,
+    );
 
     let tmpl_coarse_w = (template_full.width() as f32 / coarse_scale).max(4.0) as u32;
     let tmpl_coarse_h = (template_full.height() as f32 / coarse_scale).max(4.0) as u32;
@@ -76,7 +81,12 @@ pub fn find_template(
         return Ok(Vec::new());
     }
 
-    let template_coarse = imageops::resize(&template_full, tmpl_coarse_w, tmpl_coarse_h, imageops::FilterType::Triangle);
+    let template_coarse = imageops::resize(
+        &template_full,
+        tmpl_coarse_w,
+        tmpl_coarse_h,
+        imageops::FilterType::Triangle,
+    );
 
     // Skip if template is larger than screenshot
     if template_coarse.width() >= screenshot_coarse.width()
@@ -118,9 +128,11 @@ pub fn find_template(
 
         // Search in a small window around the candidate
         let x_min = (full_x - search_radius).max(0);
-        let x_max = (full_x + search_radius).min(screenshot_full.width() as i32 - template_full.width() as i32);
+        let x_max = (full_x + search_radius)
+            .min(screenshot_full.width() as i32 - template_full.width() as i32);
         let y_min = (full_y - search_radius).max(0);
-        let y_max = (full_y + search_radius).min(screenshot_full.height() as i32 - template_full.height() as i32);
+        let y_max = (full_y + search_radius)
+            .min(screenshot_full.height() as i32 - template_full.height() as i32);
 
         if x_max <= x_min || y_max <= y_min {
             trace!(candidate = i, cx = cx, cy = cy, "Skipped - invalid region");
@@ -183,7 +195,12 @@ pub fn find_template(
 }
 
 /// Perform NCC matching over entire image
-fn ncc_match(img: &GrayImage, tmpl: &GrayImage, threshold: f32, stride: usize) -> Vec<(i32, i32, f32)> {
+fn ncc_match(
+    img: &GrayImage,
+    tmpl: &GrayImage,
+    threshold: f32,
+    stride: usize,
+) -> Vec<(i32, i32, f32)> {
     ncc_match_region(
         img,
         tmpl,
@@ -192,9 +209,10 @@ fn ncc_match(img: &GrayImage, tmpl: &GrayImage, threshold: f32, stride: usize) -
         0,
         img.width() as i32 - tmpl.width() as i32,
         img.height() as i32 - tmpl.height() as i32,
-    ).into_iter()
-        .step_by(stride.max(1))
-        .collect()
+    )
+    .into_iter()
+    .step_by(stride.max(1))
+    .collect()
 }
 
 /// Perform NCC matching in a specific region
@@ -305,7 +323,14 @@ mod tests {
     }
 
     /// Create an image with a pattern at a specific location
-    fn make_image_with_pattern(width: u32, height: u32, bg: u8, pattern: &GrayImage, px: u32, py: u32) -> GrayImage {
+    fn make_image_with_pattern(
+        width: u32,
+        height: u32,
+        bg: u8,
+        pattern: &GrayImage,
+        px: u32,
+        py: u32,
+    ) -> GrayImage {
         let mut img = make_image(width, height, bg);
         for y in 0..pattern.height() {
             for x in 0..pattern.width() {
@@ -338,8 +363,12 @@ mod tests {
 
         let tmpl_pixels: Vec<f32> = template.pixels().map(|p| p.0[0] as f32).collect();
         let tmpl_mean: f32 = tmpl_pixels.iter().sum::<f32>() / tmpl_pixels.len() as f32;
-        let tmpl_std: f32 = (tmpl_pixels.iter().map(|&p| (p - tmpl_mean).powi(2)).sum::<f32>()
-            / tmpl_pixels.len() as f32).sqrt();
+        let tmpl_std: f32 = (tmpl_pixels
+            .iter()
+            .map(|&p| (p - tmpl_mean).powi(2))
+            .sum::<f32>()
+            / tmpl_pixels.len() as f32)
+            .sqrt();
 
         let ncc = compute_ncc(&template, 0, 0, &template, 20, 20, tmpl_mean, tmpl_std);
         assert!(ncc > 0.99, "Perfect self-match should be ~1.0, got {}", ncc);
@@ -353,12 +382,20 @@ mod tests {
 
         let tmpl_pixels: Vec<f32> = template.pixels().map(|p| p.0[0] as f32).collect();
         let tmpl_mean: f32 = tmpl_pixels.iter().sum::<f32>() / tmpl_pixels.len() as f32;
-        let tmpl_std: f32 = (tmpl_pixels.iter().map(|&p| (p - tmpl_mean).powi(2)).sum::<f32>()
-            / tmpl_pixels.len() as f32).sqrt();
+        let tmpl_std: f32 = (tmpl_pixels
+            .iter()
+            .map(|&p| (p - tmpl_mean).powi(2))
+            .sum::<f32>()
+            / tmpl_pixels.len() as f32)
+            .sqrt();
 
         // Uniform region has zero std, should return 0
         let ncc = compute_ncc(&uniform, 10, 10, &template, 20, 20, tmpl_mean, tmpl_std);
-        assert!(ncc < 0.1, "Match in uniform region should be low, got {}", ncc);
+        assert!(
+            ncc < 0.1,
+            "Match in uniform region should be low, got {}",
+            ncc
+        );
     }
 
     #[test]
@@ -375,7 +412,10 @@ mod tests {
         assert!(!matches.is_empty(), "Should find at least one match");
 
         // Best match should be at (75, 50)
-        let best = matches.iter().max_by(|a, b| a.2.partial_cmp(&b.2).unwrap()).unwrap();
+        let best = matches
+            .iter()
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+            .unwrap();
         assert_eq!(best.0, 75, "X should be 75, got {}", best.0);
         assert_eq!(best.1, 50, "Y should be 50, got {}", best.1);
         assert!(best.2 > 0.95, "Confidence should be high, got {}", best.2);
@@ -392,7 +432,10 @@ mod tests {
 
         // Search in region that excludes the template
         let matches = ncc_match_region(&img, &template, 0.9, 0, 0, 50, 30);
-        assert!(matches.is_empty(), "Should not find match outside template location");
+        assert!(
+            matches.is_empty(),
+            "Should not find match outside template location"
+        );
     }
 
     #[test]
@@ -412,10 +455,13 @@ mod tests {
         assert!(!coarse_matches.is_empty(), "Should find coarse candidates");
 
         // Expected coarse location: 150/4=37, 200/4=50
-        let has_near_expected = coarse_matches.iter().any(|(x, y, _)| {
-            (*x - 37).abs() < 5 && (*y - 50).abs() < 5
-        });
-        assert!(has_near_expected, "Coarse candidates should include area near (37, 50)");
+        let has_near_expected = coarse_matches
+            .iter()
+            .any(|(x, y, _)| (*x - 37).abs() < 5 && (*y - 50).abs() < 5);
+        assert!(
+            has_near_expected,
+            "Coarse candidates should include area near (37, 50)"
+        );
     }
 
     #[test]
@@ -431,7 +477,11 @@ mod tests {
         let matches_s2 = ncc_match(&img, &template, 0.9, 2);
         // Note: current implementation applies stride AFTER matching, which is a bug
         // This test documents current behavior
-        eprintln!("Stride 1 matches: {}, Stride 2 matches: {}", matches_s1.len(), matches_s2.len());
+        eprintln!(
+            "Stride 1 matches: {}, Stride 2 matches: {}",
+            matches_s1.len(),
+            matches_s2.len()
+        );
     }
 
     #[test]
@@ -453,12 +503,26 @@ mod tests {
         // Should still find it with lower threshold
         let matches = ncc_match_region(&img, &template, 0.7, 0, 0, 180, 180);
 
-        eprintln!("Matches with noise: {:?}", matches.iter().take(5).collect::<Vec<_>>());
+        eprintln!(
+            "Matches with noise: {:?}",
+            matches.iter().take(5).collect::<Vec<_>>()
+        );
         assert!(!matches.is_empty(), "Should find match even with noise");
 
-        let best = matches.iter().max_by(|a, b| a.2.partial_cmp(&b.2).unwrap()).unwrap();
-        assert!((best.0 - 75).abs() <= 2, "X should be near 75, got {}", best.0);
-        assert!((best.1 - 50).abs() <= 2, "Y should be near 50, got {}", best.1);
+        let best = matches
+            .iter()
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+            .unwrap();
+        assert!(
+            (best.0 - 75).abs() <= 2,
+            "X should be near 75, got {}",
+            best.0
+        );
+        assert!(
+            (best.1 - 50).abs() <= 2,
+            "Y should be near 50, got {}",
+            best.1
+        );
     }
 
     #[test]
@@ -508,8 +572,12 @@ mod tests {
         // Compute template stats
         let tmpl_pixels: Vec<f32> = template.pixels().map(|p| p.0[0] as f32).collect();
         let tmpl_mean: f32 = tmpl_pixels.iter().sum::<f32>() / tmpl_pixels.len() as f32;
-        let tmpl_std: f32 = (tmpl_pixels.iter().map(|&p| (p - tmpl_mean).powi(2)).sum::<f32>()
-            / tmpl_pixels.len() as f32).sqrt();
+        let tmpl_std: f32 = (tmpl_pixels
+            .iter()
+            .map(|&p| (p - tmpl_mean).powi(2))
+            .sum::<f32>()
+            / tmpl_pixels.len() as f32)
+            .sqrt();
         eprintln!("Template mean={:.1}, std={:.1}", tmpl_mean, tmpl_std);
 
         // Check NCC at expected location (930, 606) - but we need top-left corner
@@ -519,7 +587,8 @@ mod tests {
         eprintln!("Expected top-left: ({}, {})", expected_x, expected_y);
 
         // Compute NCC at expected location
-        if expected_x >= 0 && expected_y >= 0
+        if expected_x >= 0
+            && expected_y >= 0
             && expected_x + template.width() as i32 <= screenshot.width() as i32
             && expected_y + template.height() as i32 <= screenshot.height() as i32
         {
@@ -542,24 +611,39 @@ mod tests {
         let y_min = (expected_y - 50).max(0);
         let y_max = (expected_y + 50).min(screenshot.height() as i32 - template.height() as i32);
 
-        eprintln!("Searching region: x=[{}, {}], y=[{}, {}]", x_min, x_max, y_min, y_max);
+        eprintln!(
+            "Searching region: x=[{}, {}], y=[{}, {}]",
+            x_min, x_max, y_min, y_max
+        );
 
         let matches = ncc_match_region(&screenshot, &template, 0.3, x_min, y_min, x_max, y_max);
         eprintln!("Found {} matches above 0.3 threshold", matches.len());
 
         if !matches.is_empty() {
-            let best = matches.iter().max_by(|a, b| a.2.partial_cmp(&b.2).unwrap()).unwrap();
-            eprintln!("Best local match: ({}, {}) conf={:.4}", best.0, best.1, best.2);
+            let best = matches
+                .iter()
+                .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+                .unwrap();
+            eprintln!(
+                "Best local match: ({}, {}) conf={:.4}",
+                best.0, best.1, best.2
+            );
         }
 
         // Also do a broader search to see if there's a better match elsewhere
         let broad_matches = ncc_match_region(
-            &screenshot, &template, 0.5,
-            0, 0,
+            &screenshot,
+            &template,
+            0.5,
+            0,
+            0,
             (screenshot.width() - template.width()) as i32,
             (screenshot.height() - template.height()) as i32,
         );
-        eprintln!("Broad search found {} matches above 0.5", broad_matches.len());
+        eprintln!(
+            "Broad search found {} matches above 0.5",
+            broad_matches.len()
+        );
 
         if !broad_matches.is_empty() {
             let mut sorted = broad_matches.clone();

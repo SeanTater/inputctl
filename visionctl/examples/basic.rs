@@ -1,4 +1,4 @@
-use visionctl::{VisionCtl, LlmConfig};
+use visionctl::{LlmConfig, VisionCtl};
 
 fn main() -> visionctl::Result<()> {
     // Configure for Ollama (default local setup)

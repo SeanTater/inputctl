@@ -8,8 +8,8 @@ pub mod mouse;
 
 use cursor::CursorState;
 use evdev::uinput::VirtualDevice;
-use evdev::{InputEvent, RelativeAxisType};
 pub use evdev::Key;
+use evdev::{InputEvent, RelativeAxisType};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -450,7 +450,11 @@ impl InputCtl {
         let waypoints = interpolation::generate_waypoints(dx, dy, duration, curve, noise, fps);
         let delay_ms = ((duration * 1000.0) / waypoints.len() as f64) as u64;
 
-        trace!(waypoints = waypoints.len(), delay_ms = delay_ms, "Generated waypoints");
+        trace!(
+            waypoints = waypoints.len(),
+            delay_ms = delay_ms,
+            "Generated waypoints"
+        );
 
         for (waypoint_x, waypoint_y) in waypoints {
             // Calculate where cursor should be now (absolute position)
@@ -481,7 +485,11 @@ impl InputCtl {
     /// Positive values scroll up/right, negative scroll down/left
     pub fn scroll(&mut self, amount: i32) -> Result<()> {
         let events = [
-            InputEvent::new_now(evdev::EventType::RELATIVE, RelativeAxisType::REL_WHEEL.0, amount),
+            InputEvent::new_now(
+                evdev::EventType::RELATIVE,
+                RelativeAxisType::REL_WHEEL.0,
+                amount,
+            ),
             InputEvent::new_now(evdev::EventType::SYNCHRONIZATION, 0, 0), // SYN_REPORT
         ];
         self.device.emit(&events)?;
@@ -491,7 +499,11 @@ impl InputCtl {
     /// Scroll horizontally
     pub fn scroll_horizontal(&mut self, amount: i32) -> Result<()> {
         let events = [
-            InputEvent::new_now(evdev::EventType::RELATIVE, RelativeAxisType::REL_HWHEEL.0, amount),
+            InputEvent::new_now(
+                evdev::EventType::RELATIVE,
+                RelativeAxisType::REL_HWHEEL.0,
+                amount,
+            ),
             InputEvent::new_now(evdev::EventType::SYNCHRONIZATION, 0, 0), // SYN_REPORT
         ];
         self.device.emit(&events)?;
@@ -550,20 +562,14 @@ mod python {
     impl PyInputCtl {
         #[new]
         fn new() -> PyResult<Self> {
-            let inner = InputCtl::new().map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })?;
+            let inner =
+                InputCtl::new().map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
             Ok(Self { inner })
         }
 
         /// Type a string of text
         #[pyo3(signature = (text, key_delay_ms=20, key_hold_ms=20))]
-        fn type_text(
-            &mut self,
-            text: &str,
-            key_delay_ms: u64,
-            key_hold_ms: u64,
-        ) -> PyResult<()> {
+        fn type_text(&mut self, text: &str, key_delay_ms: u64, key_hold_ms: u64) -> PyResult<()> {
             self.inner
                 .type_text_with_delay(text, key_delay_ms, key_hold_ms)
                 .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
@@ -576,20 +582,22 @@ mod python {
                 "left" => MouseButton::Left,
                 "right" => MouseButton::Right,
                 "middle" => MouseButton::Middle,
-                _ => return Err(pyo3::exceptions::PyValueError::new_err(
-                    "button must be 'left', 'right', or 'middle'"
-                )),
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "button must be 'left', 'right', or 'middle'",
+                    ))
+                }
             };
-            self.inner.click(btn).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })
+            self.inner
+                .click(btn)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Move mouse by relative amount
         fn move_mouse(&mut self, dx: i32, dy: i32) -> PyResult<()> {
-            self.inner.move_mouse(dx, dy).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })
+            self.inner
+                .move_mouse(dx, dy)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Move mouse smoothly with interpolation
@@ -631,49 +639,49 @@ mod python {
 
         /// Scroll the mouse wheel (positive=up, negative=down)
         fn scroll(&mut self, amount: i32) -> PyResult<()> {
-            self.inner.scroll(amount).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })
+            self.inner
+                .scroll(amount)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Press a key by name (e.g., "enter", "space", "a")
         fn key_press(&mut self, key_name: &str) -> PyResult<()> {
             let key = py_parse_key_name(key_name)?;
-            self.inner.key_click(key).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })
+            self.inner
+                .key_click(key)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Hold a key down
         fn key_down(&mut self, key_name: &str) -> PyResult<()> {
             let key = py_parse_key_name(key_name)?;
-            self.inner.key_down(key).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })
+            self.inner
+                .key_down(key)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Release a key
         fn key_up(&mut self, key_name: &str) -> PyResult<()> {
             let key = py_parse_key_name(key_name)?;
-            self.inner.key_up(key).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })
+            self.inner
+                .key_up(key)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Press a mouse button down
         fn mouse_down(&mut self, button: &str) -> PyResult<()> {
             let btn = parse_mouse_button(button)?;
-            self.inner.mouse_down(btn).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })
+            self.inner
+                .mouse_down(btn)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Release a mouse button
         fn mouse_up(&mut self, button: &str) -> PyResult<()> {
             let btn = parse_mouse_button(button)?;
-            self.inner.mouse_up(btn).map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })
+            self.inner
+                .mouse_up(btn)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
 
         /// Check if a key is currently held down
@@ -715,14 +723,15 @@ mod python {
 
         /// Release all currently held keys and mouse buttons
         fn release_all(&mut self) -> PyResult<()> {
-            self.inner.release_all().map_err(|e| {
-                pyo3::exceptions::PyOSError::new_err(e.to_string())
-            })
+            self.inner
+                .release_all()
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
         }
     }
 
     fn py_parse_key_name(name: &str) -> PyResult<Key> {
-        crate::parse_key_name(name).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+        crate::parse_key_name(name)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn parse_mouse_button(name: &str) -> PyResult<MouseButton> {
@@ -734,9 +743,9 @@ mod python {
             "extra" => MouseButton::Extra,
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Unknown mouse button: {}. Must be 'left', 'right', 'middle', 'side', or 'extra'",
-                    name
-                )))
+                "Unknown mouse button: {}. Must be 'left', 'right', 'middle', 'side', or 'extra'",
+                name
+            )))
             }
         };
         Ok(button)

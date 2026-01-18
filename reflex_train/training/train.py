@@ -2,13 +2,14 @@ import json
 import os
 import random
 import time
+import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
-from reflex_train.data.dataset import MultiStreamDataset
+from reflex_train.data.dataset import MultiStreamDataset, StreamingDataset
 from reflex_train.data.keys import NUM_KEYS
 from reflex_train.data.intent import INTENTS
 from reflex_train.models.reflex_net import ReflexNet
@@ -76,24 +77,24 @@ def train(cfg):
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    loader_kwargs = {
-        "batch_size": cfg.batch_size,
+    common_loader_kwargs = {
         "num_workers": cfg.workers,
         "pin_memory": True,
         "persistent_workers": cfg.workers > 0,
     }
     if cfg.workers > 0:
-        loader_kwargs["prefetch_factor"] = 2
+        common_loader_kwargs["prefetch_factor"] = 2
 
     train_loader = DataLoader(
-        train_dataset,
-        shuffle=True,
-        **loader_kwargs,
+        StreamingDataset(train_dataset, seed=cfg.seed),
+        batch_size=cfg.batch_size,
+        **common_loader_kwargs,
     )
     val_loader = DataLoader(
         val_dataset,
+        batch_size=cfg.batch_size,
         shuffle=False,
-        **loader_kwargs,
+        **common_loader_kwargs,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -122,10 +123,12 @@ def train(cfg):
         start_time = time.time()
 
         step_times = []
+        total_steps = math.ceil(train_size / cfg.batch_size) if cfg.batch_size else None
         progress = tqdm(
             train_loader,
             desc=f"Epoch {epoch}",
             unit="batch",
+            total=total_steps,
             leave=False,
             smoothing=0.0,
         )

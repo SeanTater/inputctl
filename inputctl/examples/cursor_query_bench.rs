@@ -75,13 +75,13 @@ fn main() {
         println!("{:>10}: {:>5} ({:>5.1}%)", label, count, pct);
     }
 
-    // Compare with old visionctl::find_cursor()
-    println!("\n=== Comparison with visionctl::find_cursor() ===");
+    // Compare with inputctl_capture::find_cursor()
+    println!("\n=== Comparison with inputctl_capture::find_cursor() ===");
     println!("(This is the OLD slow method - 5 iterations only)");
     let mut old_latencies = Vec::new();
     for _ in 0..5 {
         let start = Instant::now();
-        let _ = visionctl::find_cursor();
+        let _ = inputctl_capture::find_cursor();
         let elapsed = start.elapsed();
         old_latencies.push(elapsed.as_millis() as f64);
     }

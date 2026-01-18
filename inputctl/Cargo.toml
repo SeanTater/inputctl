@@ -20,7 +20,8 @@ workspace = true
 optional = true
 
 [dev-dependencies]
-visionctl = { path = "../visionctl" }
+inputctl-vision = { path = "../inputctl-vision" }
+inputctl-capture = { path = "../inputctl-capture" }
 
 [features]
 default = []

@@ -1,208 +1,200 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with this repository.
 
 ## Workspace Structure
 
-This is a Cargo workspace with two crates:
+This is a Cargo workspace with five crates:
 
-- **inputctl** - Linux input automation library (keyboard/mouse control via uinput)
-- **visionctl** - Screen capture and LLM vision analysis (Wayland screenshots + local LLM queries)
+```
+inputctl/           Keyboard/mouse control via uinput
+inputctl-capture/   Screen capture via Wayland portal + KWin cursor
+inputctl-vision/    LLM agent, tool-calling, web debugger
+inputctl-reflex/    ONNX inference for game AI
+reflex_train/       Python training pipeline (separate venv)
+```
 
-Each crate has its own Python bindings via PyO3/maturin.
+### Dependency Graph
+
+```
+inputctl + inputctl-capture (independent primitives)
+        ↓
+inputctl-vision (LLM + agent, uses both)
+        ↓
+inputctl-reflex (ONNX inference, uses inputctl + inputctl-capture)
+        ↓
+reflex_train (Python, produces ONNX models)
+```
 
 ## Build Commands
 
 ```bash
-# Build all Rust crates in workspace
+# Build all Rust crates
 cargo build --release
 
 # Build specific crate
 cargo build --release -p inputctl
-cargo build --release -p visionctl
+cargo build --release -p inputctl-capture
+cargo build --release -p inputctl-vision
+cargo build --release -p inputctl-reflex
 
-# Run inputctl tests (unit tests only)
-cargo test -p inputctl
+# Run tests
+cargo test --workspace
+sudo cargo test -p inputctl -- --ignored  # Integration tests need uinput
 
-# Run inputctl integration tests (requires sudo for /dev/uinput)
-sudo cargo test -p inputctl -- --ignored
+# Build Python packages
+cd inputctl && maturin develop --uv && cd ..
+cd inputctl-vision && maturin develop --uv && cd ..
 
-# Build inputctl Python wheel
-cd inputctl && maturin build --release
-
-# Build visionctl Python wheel
-cd visionctl && maturin build --release
-
-# Install inputctl Python package for development
-cd inputctl && maturin develop --uv
-
-# Install visionctl Python package for development
-cd visionctl && maturin develop --uv
-
-# Run inputctl Python tests
-cd inputctl && uv run pytest python_tests/ -v -m "not integration"
-
-# Run inputctl Python integration tests (requires sudo)
-# IMPORTANT: Use .venv/bin/python, NOT "sudo uv run python"
-# (sudo uv run creates a root-owned environment)
-cd inputctl && sudo ../.venv/bin/python -m pytest python_tests/ -v
-
-# Run visionctl CLI utility
-cargo run --release -p visionctl --bin visionctl "What's on my screen?"
-
-# Or with environment variables
-VISIONCTL_BACKEND=ollama VISIONCTL_URL=http://localhost:11434 VISIONCTL_MODEL=llava \
-  cargo run --release -p visionctl --bin visionctl "What's on my screen?"
+# Run CLIs
+inputctl-vision "What's on my screen?"
+inputctl-vision agent "Open Firefox"
+inputctl-record --output dataset --fps 10
 ```
 
 ## Setup
 
 ```bash
-# Install maturin as a uv tool
+# Install system dependencies (Ubuntu/Debian)
+sudo apt-get install -y \
+  gstreamer1.0-tools gstreamer1.0-plugins-{base,good,bad,ugly} \
+  gstreamer1.0-libav libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  xdg-desktop-portal
+
+# Install maturin
 uv tool install maturin
 
-# Sync dev dependencies and build both Python packages
+# Build Python packages
 uv sync
 cd inputctl && maturin develop --uv && cd ..
-cd visionctl && maturin develop --uv && cd ..
+cd inputctl-vision && maturin develop --uv && cd ..
 ```
 
-## Architecture
+## Crate Details
 
 ### inputctl
 
-Linux input automation library using uinput, with Python bindings via pyo3.
+Low-level keyboard/mouse control via Linux uinput.
 
-#### Core Components
+**Key files:**
+- `src/lib.rs` - Main `InputCtl` struct + pyo3 bindings
+- `src/device.rs` - uinput virtual device creation
+- `src/keyboard.rs` - ASCII-to-keycode mapping
+- `src/interpolation.rs` - Smooth mouse movement with noise
 
-- `inputctl/src/lib.rs` - Main `InputCtl` struct and public API, plus pyo3 bindings (behind `python` feature)
-- `inputctl/src/device.rs` - Creates the uinput virtual device with keyboard/mouse capabilities
-- `inputctl/src/keyboard.rs` - ASCII-to-keycode mapping for US keyboard layout
-- `inputctl/src/mouse.rs` - Mouse button enum and key mappings
-- `inputctl/src/interpolation.rs` - Smooth mouse movement with low-frequency Perlin-like noise
+**Design:**
+- No daemon needed - holds uinput handle in memory
+- ~1 second init delay when `InputCtl::new()` called
+- Servo feedback for pointer acceleration compensation
 
-### Key Design Decisions
+**Requires:** `/dev/uinput` access (root or input group)
 
-- **No daemon needed**: Unlike the C version, this library holds the uinput device handle in memory. The ~1 second initialization delay happens once when `InputCtl::new()` is called.
-- **Uses evdev crate**: Wraps Linux uinput via the `evdev` crate
-- **Feature-gated Python**: pyo3 bindings only compiled with `--features python`
-- **Smooth mouse movement**: Uses low-frequency Perlin-like noise (control points every ~200ms) with cubic interpolation for natural-looking movement paths. Noise amount is configurable (default ±2 pixels).
+### inputctl-capture
 
-### Permission Requirements
+Screen capture and cursor tracking primitives.
 
-Requires access to `/dev/uinput`:
-- Run as root, OR
-- Add user to `input` group with appropriate udev rules
+**Key files:**
+- `src/capture/portal.rs` - xdg-desktop-portal ScreenCast
+- `src/primitives/cursor.rs` - KWin DBus cursor tracking
+- `src/primitives/screenshot.rs` - Screenshot capture + processing
+- `src/recorder.rs` - Video + input event recording
 
-### API Features
+**Design:**
+- Portal-based capture works on any Wayland compositor
+- KWin cursor tracking (KDE Plasma only)
+- GStreamer pipeline for video processing
 
-**Smooth Mouse Movement** (`move_mouse_smooth`):
-- Moves mouse with realistic low-frequency noise variation
-- Parameters: `dx`, `dy`, `duration`, `curve` ("linear" or "ease-in-out"), `noise` (default 2.0)
-- Noise amount: 0.0 = perfectly smooth, 2.0 = subtle (default), 5.0 = more obvious
-- Uses cubic interpolation with control points every ~200ms for natural wavering
-- Always hits exact target position despite noise
+**Binaries:** `inputctl-record` for training data capture
 
-**Example (Python)**:
+### inputctl-vision
+
+LLM-based GUI automation with autonomous agent.
+
+**Key files:**
+- `src/lib.rs` - `VisionCtl` main controller
+- `src/agent.rs` - Autonomous agent loop
+- `src/llm/` - LLM client with tool-calling
+- `src/llm/tools.rs` - Agent tool definitions
+- `src/debugger.rs` - Agent state tracking
+- `src/server.rs` - Web debugger server
+- `src/detection/` - Template matching (rarely used)
+
+**Design:**
+- Agent uses normalized coordinates (0-1000)
+- Screenshots include cursor marker (red crosshair)
+- Web debugger at localhost:3000 with `--debug` flag
+- Template matching available but LLM vision preferred
+
+**Environment variables:**
+- `VISIONCTL_BACKEND` - ollama, vllm, openai
+- `VISIONCTL_URL` - Backend URL
+- `VISIONCTL_MODEL` - Model name
+- `VISIONCTL_API_KEY` - API key (for OpenAI)
+
+### inputctl-reflex
+
+ONNX inference for game AI.
+
+**Key files:**
+- `src/main.rs` - Live and eval mode runners
+
+**Design:**
+- Live mode: capture screenshots, run inference, execute keys
+- Eval mode: offline evaluation on recorded data
+- Uses `ort` crate for ONNX runtime
+
+**Note:** Inverse dynamics is stubbed in training but not inference
+
+### reflex_train
+
+Python training pipeline (separate from Rust workspace).
+
+**Key files:**
+- `training/train.py` - Main training script
+- `training/data.py` - Dataset loading
+- `training/model.py` - Model architecture
+
+**Note:** Template matching in training is for weak labeling (different purpose than detection/ in inputctl-vision)
+
+## Common Pitfalls
+
+**Never use `sudo uv run python`** - creates root-owned venv. Use `sudo .venv/bin/python` instead.
+
+**KDE screenshot permissions** - Run `inputctl-vision install-desktop-file` to grant portal access.
+
+**ONNX Runtime** - If `ort` can't find runtime, set `ORT_LIB_LOCATION=/usr/lib/libonnxruntime.so`
+
+## Python Usage
+
 ```python
+# Low-level input
 from inputctl import InputCtl
 ctl = InputCtl()
-# Subtle natural variation (default)
-ctl.move_mouse_smooth(100, 50, 1.0, "ease-in-out", noise=2.0)
-# Perfectly smooth
-ctl.move_mouse_smooth(100, 50, 1.0, "linear", noise=0.0)
+ctl.type_text("Hello!")
+ctl.move_mouse_smooth(100, 50, 1.0, "ease-in-out")
+ctl.click("left")
+
+# LLM-based automation
+from inputctl_vision import VisionCtl
+ctl = VisionCtl(backend="ollama", url="http://localhost:11434", model="llava")
+answer = ctl.ask("What's on screen?")
+ctl.move_to(500, 300)  # Normalized 0-1000
+ctl.click("left")
 ```
 
-#### Common Pitfalls
+## CLI Examples
 
-⚠️ **NEVER use `sudo uv run python`** - it creates a root-owned venv that causes permission errors. Always use `sudo .venv/bin/python` or `sudo $(which python)` for scripts requiring uinput access.
-
----
-
-### visionctl
-
-Screen capture and LLM vision analysis library for Wayland, with Python bindings via pyo3.
-
-#### Core Components
-
-- `visionctl/src/lib.rs` - Main `VisionCtl` struct and public API, plus pyo3 bindings (behind `python` feature)
-- `visionctl/src/screenshot.rs` - Wrapper for `grim` command to capture Wayland screenshots
-- `visionctl/src/llm.rs` - HTTP client for LLM APIs (Ollama, vLLM, OpenAI-compatible)
-- `visionctl/src/error.rs` - Error types
-- `visionctl/src/bin/visionctl.rs` - CLI utility for querying LLMs about current screen
-
-#### Key Design Decisions
-
-- **Minimal dependencies**: Shells out to `grim` for screenshots instead of complex Wayland protocol handling
-- **Blocking HTTP**: Uses reqwest blocking API for simplicity (no async complexity)
-- **Multiple LLM backends**: Supports Ollama, vLLM, and OpenAI-compatible APIs
-- **Feature-gated Python**: pyo3 bindings only compiled with `--features python`
-- **Base64 encoding**: Images sent to LLMs as base64-encoded PNG data
-
-#### System Requirements
-
-- **grim** - Wayland screenshot tool (must be installed)
-- **LLM backend** - Ollama, vLLM, or OpenAI-compatible API running locally or remotely
-
-#### API Features
-
-**Two main functions**:
-1. `screenshot()` - Capture screenshot and return PNG bytes
-2. `ask(question)` - Capture screenshot and query LLM
-
-**Example (Rust)**:
-```rust
-use visionctl::{VisionCtl, LlmConfig};
-
-let config = LlmConfig::Ollama {
-    url: "http://localhost:11434".to_string(),
-    model: "llava".to_string(),
-};
-
-let ctl = VisionCtl::new(config)?;
-let answer = ctl.ask("What's on my screen?")?;
-```
-
-**Example (Python)**:
-```python
-from visionctl import VisionCtl
-
-ctl = VisionCtl(
-    backend="ollama",
-    url="http://localhost:11434",
-    model="llava"
-)
-
-answer = ctl.ask("What's on my screen?")
-print(answer)
-```
-
-**Example (CLI)**:
 ```bash
-# Using environment variables
-export VISIONCTL_BACKEND=ollama
-export VISIONCTL_URL=http://localhost:11434
-export VISIONCTL_MODEL=llava
+# Ask about screen
+inputctl-vision "What windows are open?"
 
-visionctl "What applications are open?"
-# Output: {"question": "What applications are open?", "answer": "..."}
+# Run autonomous agent
+inputctl-vision agent "Open Firefox and go to example.com"
+inputctl-vision agent --debug "Open Settings"  # With web debugger
+
+# Record training data
+inputctl-record --output dataset --fps 10 --preset ultrafast
+
+# Run trained model
+cargo run -p inputctl-reflex -- --model model.onnx live --window "Game" --fps 10
 ```
-
-#### LLM Backend Configuration
-
-**Ollama** (default):
-- `VISIONCTL_BACKEND=ollama`
-- `VISIONCTL_URL=http://localhost:11434`
-- `VISIONCTL_MODEL=llava` (or other vision model)
-
-**vLLM**:
-- `VISIONCTL_BACKEND=vllm`
-- `VISIONCTL_URL=http://localhost:8000`
-- `VISIONCTL_MODEL=<model-name>`
-- `VISIONCTL_API_KEY=<optional-key>`
-
-**OpenAI-compatible**:
-- `VISIONCTL_BACKEND=openai`
-- `VISIONCTL_URL=<api-endpoint>`
-- `VISIONCTL_MODEL=<model-name>`
-- `VISIONCTL_API_KEY=<required-key>`

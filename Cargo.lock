@@ -1800,12 +1800,85 @@ name = "inputctl"
 version = "0.1.0"
 dependencies = [
  "evdev",
+ "inputctl-capture",
+ "inputctl-vision",
  "pyo3",
  "rand 0.8.5",
  "thiserror 2.0.17",
  "tracing",
- "visionctl",
  "zbus",
+]
+
+[[package]]
+name = "inputctl-capture"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "anyhow",
+ "ashpd",
+ "chrono",
+ "clap",
+ "ctrlc",
+ "dialoguer",
+ "evdev",
+ "gstreamer",
+ "gstreamer-app",
+ "image",
+ "imageproc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "zbus",
+ "zvariant",
+]
+
+[[package]]
+name = "inputctl-reflex"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "image",
+ "inputctl",
+ "inputctl-capture",
+ "ndarray",
+ "ort",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "inputctl-vision"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-std",
+ "axum",
+ "base64",
+ "clap",
+ "dialoguer",
+ "image",
+ "imageproc",
+ "inputctl",
+ "inputctl-capture",
+ "mime_guess",
+ "nix 0.29.0",
+ "pyo3",
+ "regex",
+ "reqwest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "toml 0.8.23",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2865,21 +2938,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags 2.10.0",
-]
-
-[[package]]
-name = "reflex_infer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "image",
- "inputctl",
- "ndarray",
- "ort",
- "serde",
- "serde_json",
- "visionctl",
 ]
 
 [[package]]
@@ -3993,45 +4051,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "visionctl"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "anyhow",
- "ashpd",
- "async-std",
- "axum",
- "base64",
- "chrono",
- "clap",
- "ctrlc",
- "dialoguer",
- "evdev",
- "gstreamer",
- "gstreamer-app",
- "image",
- "imageproc",
- "inputctl",
- "mime_guess",
- "nix 0.29.0",
- "pyo3",
- "regex",
- "reqwest",
- "rust-embed",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.17",
- "tokio",
- "toml 0.8.23",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "zbus",
- "zvariant",
-]
 
 [[package]]
 name = "walkdir"

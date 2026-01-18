@@ -254,7 +254,7 @@ fn test_get_held_buttons() {
 #[test]
 #[ignore = "requires /dev/uinput access and KDE Plasma (run with sudo)"]
 fn test_mouse_movement_accuracy() {
-    use visionctl::find_cursor;
+    use inputctl_capture::find_cursor;
 
     println!("\n=== Mouse Movement Accuracy Test ===\n");
 
@@ -366,7 +366,7 @@ fn test_mouse_movement_accuracy() {
 #[test]
 #[ignore = "requires sudo, KDE Plasma, and single-monitor (random positions may be unreachable on multi-monitor)"]
 fn test_smooth_mouse_movement_accuracy() {
-    use visionctl::find_cursor;
+    use inputctl_capture::find_cursor;
 
     println!("\n=== Smooth Mouse Movement Accuracy Test ===\n");
 

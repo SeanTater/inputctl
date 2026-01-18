@@ -1,0 +1,61 @@
+[package]
+name = "inputctl-vision"
+version = "0.1.0"
+edition = "2021"
+description = "LLM-based GUI automation and agent for Linux"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "inputctl-vision"
+path = "src/bin/visionctl.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+inputctl = { path = "../inputctl" }
+inputctl-capture = { path = "../inputctl-capture" }
+
+# HTTP/API
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+base64 = "0.22"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Image processing
+image = "0.25"
+imageproc = "0.25"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.11"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utils
+regex = "1.10"
+anyhow = "1.0"
+tempfile = "3.14"
+nix = { version = "0.29", features = ["fs"] }
+
+# Web debugger server
+axum = { version = "0.8.8", features = ["ws"] }
+tokio = { version = "1.49.0", features = ["full"] }
+async-std = "1.13"
+tower-http = { version = "0.6.8", features = ["cors", "fs"] }
+rust-embed = "8.9.0"
+mime_guess = "2.0.5"
+
+[dependencies.pyo3]
+workspace = true
+optional = true
+
+[features]
+default = []
+python = ["pyo3"]

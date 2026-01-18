@@ -1,0 +1,179 @@
+import json
+import os
+from reflex_train.data.logs import load_key_sets, load_frame_logs
+from reflex_train.weak_labels import KeyWindowIntentLabeler, SuperTuxIntentLabeler
+from .config import LabelingConfig
+from .events import EventDetector
+from .episodes import segment_episodes, compute_returns
+
+
+def find_run_dirs(data_dir):
+    if not os.path.exists(data_dir):
+        return []
+    return [
+        os.path.join(data_dir, d)
+        for d in os.listdir(data_dir)
+        if os.path.isdir(os.path.join(data_dir, d))
+    ]
+
+
+def write_intents(path, frame_indices, frame_timestamps, intents, overwrite=False):
+    if os.path.exists(path) and not overwrite:
+        return False
+    with open(path, "w", encoding="utf-8") as f:
+        for pos, (idx, intent) in enumerate(zip(frame_indices, intents)):
+            entry = {"frame_idx": idx, "intent": intent}
+            if frame_timestamps:
+                entry["timestamp"] = frame_timestamps[pos]
+            f.write(json.dumps(entry) + "\n")
+    return True
+
+
+def write_events(path, events, overwrite=False):
+    """Write detected events to JSONL file."""
+    if os.path.exists(path) and not overwrite:
+        return False
+    with open(path, "w", encoding="utf-8") as f:
+        for event in events:
+            entry = {
+                "frame_idx": event.frame_idx,
+                "event": event.event,
+                "confidence": event.confidence,
+            }
+            f.write(json.dumps(entry) + "\n")
+    return True
+
+
+def write_episodes(path, episodes, overwrite=False):
+    """Write episode segmentation to JSONL file."""
+    if os.path.exists(path) and not overwrite:
+        return False
+    with open(path, "w", encoding="utf-8") as f:
+        for ep in episodes:
+            f.write(json.dumps(ep.to_dict()) + "\n")
+    return True
+
+
+def write_returns(path, returns, overwrite=False):
+    """Write per-frame returns to JSONL file."""
+    if os.path.exists(path) and not overwrite:
+        return False
+    with open(path, "w", encoding="utf-8") as f:
+        for frame_idx in sorted(returns.keys()):
+            entry = {"frame_idx": frame_idx, "return": returns[frame_idx]}
+            f.write(json.dumps(entry) + "\n")
+    return True
+
+
+def precompute(cfg: LabelingConfig):
+    run_dirs = find_run_dirs(cfg.data_dir)
+    if not run_dirs:
+        print("No run directories found.")
+        return
+
+    # Intent labeler
+    if cfg.labeler == "supertux":
+        labeler = SuperTuxIntentLabeler(
+            base_dir=cfg.base_dir,
+            intent_horizon=cfg.intent_horizon,
+            sprite_scale=cfg.sprite_scale,
+            sprite_threshold=cfg.sprite_threshold,
+            proximity_px=cfg.sprite_proximity,
+        )
+    elif cfg.labeler == "keys":
+        labeler = KeyWindowIntentLabeler(intent_horizon=cfg.intent_horizon)
+    else:
+        raise ValueError("labeler must be 'supertux' or 'keys'")
+
+    # Event detector for RL
+    event_detector = None
+    if cfg.detect_events:
+        event_detector = EventDetector(
+            base_dir=cfg.base_dir,
+            sprite_scale=cfg.sprite_scale,
+            death_threshold=cfg.death_threshold,
+            win_proximity_px=cfg.win_proximity_px,
+            sparkle_threshold=cfg.sparkle_threshold,
+            win_min_frames=cfg.win_min_frames,
+            check_every_n=cfg.check_every_n,
+            win_check_every_n=cfg.win_check_every_n,
+            win_llm_gate=cfg.win_llm_gate,
+            win_llm_sample_stride=cfg.win_llm_sample_stride,
+            win_llm_prompt=cfg.win_llm_prompt,
+            win_llm_timeout_s=cfg.win_llm_timeout_s,
+            win_llm_model=cfg.win_llm_model,
+            win_llm_url=cfg.win_llm_url,
+        )
+
+    for i, run_dir in enumerate(run_dirs):
+        print(f"\n[{i + 1}/{len(run_dirs)}] Processing {os.path.basename(run_dir)}")
+        frames_log = os.path.join(run_dir, "frames.jsonl")
+        inputs_log = os.path.join(run_dir, "inputs.jsonl")
+        video_path = os.path.join(run_dir, "recording.mp4")
+        if not os.path.exists(frames_log) or not os.path.exists(video_path):
+            continue
+
+        frame_indices, frame_timestamps = load_frame_logs(frames_log)
+        _, key_sets = load_key_sets(frames_log, inputs_log)
+        if not frame_indices or not key_sets:
+            continue
+
+        # Write intent labels
+        intents = labeler.label_intents(video_path, frame_indices, key_sets)
+        intent_path = os.path.join(run_dir, "intent.jsonl")
+        wrote = write_intents(
+            intent_path,
+            frame_indices,
+            frame_timestamps,
+            intents,
+            overwrite=cfg.overwrite,
+        )
+        status = "wrote" if wrote else "skipped"
+        print(f"{status} {intent_path}")
+
+        # Write event/episode/return labels for RL
+        if event_detector:
+            total_frames = max(frame_indices) + 1 if frame_indices else 0
+
+            # Detect events
+            events_path = os.path.join(run_dir, "events.jsonl")
+            events = event_detector.detect_events(video_path)
+            if events is None:
+                print(f"skipped {events_path} (video corrupted)")
+                continue
+            wrote = write_events(events_path, events, overwrite=cfg.overwrite)
+            status = "wrote" if wrote else "skipped"
+            n_deaths = sum(1 for e in events if e.event == "DEATH")
+            n_wins = sum(1 for e in events if e.event == "WIN")
+            print(f"{status} {events_path} ({n_deaths} deaths, {n_wins} wins)")
+
+            # Segment into episodes
+            episodes_path = os.path.join(run_dir, "episodes.jsonl")
+            episodes = segment_episodes(
+                events,
+                total_frames,
+                respawn_gap=cfg.respawn_gap,
+                death_reward=cfg.death_reward,
+                win_reward=cfg.win_reward,
+            )
+            wrote = write_episodes(episodes_path, episodes, overwrite=cfg.overwrite)
+            status = "wrote" if wrote else "skipped"
+            print(f"{status} {episodes_path} ({len(episodes)} episodes)")
+
+            # Compute returns
+            returns_path = os.path.join(run_dir, "returns.jsonl")
+            returns = compute_returns(
+                episodes, gamma=cfg.gamma, survival_bonus=cfg.survival_bonus
+            )
+            wrote = write_returns(returns_path, returns, overwrite=cfg.overwrite)
+            status = "wrote" if wrote else "skipped"
+            print(f"{status} {returns_path}")
+
+
+def main():
+    cfg = LabelingConfig()
+    precompute(cfg)
+
+
+if __name__ == "__main__":
+    main()

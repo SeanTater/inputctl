@@ -32,6 +32,15 @@ struct Cli {
     debounce: usize,
     #[arg(long, default_value_t = 4)]
     max_keys: usize,
+    /// Use model's predicted intent instead of fixed goal (closed-loop)
+    #[arg(long, default_value_t = false)]
+    auto_intent: bool,
+    /// Frames of consistent intent prediction before switching (prevents jitter)
+    #[arg(long, default_value_t = 5)]
+    intent_stability: usize,
+    /// Print value estimates and intent predictions
+    #[arg(long, short, default_value_t = false)]
+    verbose: bool,
     #[command(subcommand)]
     command: CommandMode,
 }
@@ -126,7 +135,7 @@ impl InferenceEngine {
         arr
     }
 
-    fn run(&mut self, pixels: &Array4<f32>, goal: &Array2<f32>) -> Result<(Vec<f32>, Vec<f32>)> {
+    fn run(&mut self, pixels: &Array4<f32>, goal: &Array2<f32>) -> Result<(Vec<f32>, Vec<f32>, f32)> {
         let outputs = self.session.run(ort::inputs![
             "pixels" => Tensor::from_array(pixels.clone())?,
             "goal" => Tensor::from_array(goal.clone())?,
@@ -134,10 +143,62 @@ impl InferenceEngine {
 
         let keys_logits = outputs[0].try_extract_array::<f32>()?;
         let intent_logits = outputs[2].try_extract_array::<f32>()?;
+        let value_output = outputs[3].try_extract_array::<f32>()?;
+
         let keys = keys_logits.into_dimensionality::<ndarray::Ix2>()?;
         let intents = intent_logits.into_dimensionality::<ndarray::Ix2>()?;
+        let value = value_output.into_dimensionality::<ndarray::Ix1>()?;
 
-        Ok((keys.row(0).to_vec(), intents.row(0).to_vec()))
+        Ok((keys.row(0).to_vec(), intents.row(0).to_vec(), value[0]))
+    }
+
+    fn num_intents(&self) -> usize {
+        self.manifest.inputs.goal.intents.len()
+    }
+
+    fn intent_name(&self, idx: usize) -> Option<&str> {
+        self.manifest.inputs.goal.intents.get(idx).map(|s| s.as_str())
+    }
+}
+
+/// Tracks intent prediction with hysteresis to prevent jitter
+struct IntentState {
+    current_intent: usize,
+    candidate_intent: usize,
+    candidate_count: usize,
+    stability_threshold: usize,
+}
+
+impl IntentState {
+    fn new(initial_intent: usize, stability_threshold: usize) -> Self {
+        Self {
+            current_intent: initial_intent,
+            candidate_intent: initial_intent,
+            candidate_count: 0,
+            stability_threshold,
+        }
+    }
+
+    /// Update with a new predicted intent, returns the (possibly unchanged) current intent
+    fn update(&mut self, predicted_intent: usize) -> usize {
+        if predicted_intent == self.current_intent {
+            // Already at this intent, reset candidate tracking
+            self.candidate_intent = predicted_intent;
+            self.candidate_count = 0;
+        } else if predicted_intent == self.candidate_intent {
+            // Same candidate as before, increment count
+            self.candidate_count += 1;
+            if self.candidate_count >= self.stability_threshold {
+                // Stable enough, switch
+                self.current_intent = predicted_intent;
+                self.candidate_count = 0;
+            }
+        } else {
+            // Different candidate, start over
+            self.candidate_intent = predicted_intent;
+            self.candidate_count = 1;
+        }
+        self.current_intent
     }
 }
 
@@ -381,15 +442,17 @@ fn live_loop(
     window: &Option<String>,
     fps: f32,
 ) -> Result<()> {
-    let intent_idx = cli
+    // Initial intent from CLI or default to first
+    let initial_intent_idx = cli
         .goal_intent
         .as_ref()
         .and_then(|name| engine.intent_index(name))
         .unwrap_or(0);
-    let goal = engine.one_hot_goal(intent_idx);
 
+    let mut goal = engine.one_hot_goal(initial_intent_idx);
+    let mut intent_state = IntentState::new(initial_intent_idx, cli.intent_stability);
     let mut buffer: VecDeque<Vec<f32>> = VecDeque::with_capacity(3);
-    let mut state = ActionState::new(engine.manifest.outputs.keys_logits.keys.len());
+    let mut action_state = ActionState::new(engine.manifest.outputs.keys_logits.keys.len());
     let mut input = InputCtl::new()?;
 
     let frame_interval = if fps > 0.0 {
@@ -397,6 +460,14 @@ fn live_loop(
     } else {
         Duration::from_secs_f32(0.0)
     };
+
+    if cli.verbose {
+        println!(
+            "Starting live loop: auto_intent={}, initial_intent={:?}",
+            cli.auto_intent,
+            engine.intent_name(initial_intent_idx)
+        );
+    }
 
     loop {
         let start = Instant::now();
@@ -410,8 +481,33 @@ fn live_loop(
         }
 
         let pixels = build_pixels(cli.height, cli.width, &buffer);
-        let (keys_logits, _intent_logits) = engine.run(&pixels, &goal)?;
-        let delta = state.update(&keys_logits, cli.threshold, cli.debounce, cli.max_keys);
+        let (keys_logits, intent_logits, value) = engine.run(&pixels, &goal)?;
+
+        // Auto-intent: use predicted intent as goal for next frame
+        if cli.auto_intent {
+            let predicted_intent_idx = intent_logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            let stable_intent = intent_state.update(predicted_intent_idx);
+            goal = engine.one_hot_goal(stable_intent);
+
+            if cli.verbose {
+                println!(
+                    "value={:.3} pred_intent={:?} stable_intent={:?}",
+                    value,
+                    engine.intent_name(predicted_intent_idx),
+                    engine.intent_name(stable_intent)
+                );
+            }
+        } else if cli.verbose {
+            println!("value={:.3}", value);
+        }
+
+        let delta = action_state.update(&keys_logits, cli.threshold, cli.debounce, cli.max_keys);
 
         for idx in delta.released {
             if let Some(name) = engine.manifest.outputs.keys_logits.keys.get(idx) {
@@ -485,7 +581,7 @@ fn eval_loop(
         let goal = engine.one_hot_goal(intent_idx);
 
         let pixels = build_pixels(cli.height, cli.width, &buffer);
-        let (keys_logits, intent_logits) = engine.run(&pixels, &goal)?;
+        let (keys_logits, intent_logits, value) = engine.run(&pixels, &goal)?;
         let delta = state.update(&keys_logits, cli.threshold, cli.debounce, cli.max_keys);
         let predicted_intent_idx = intent_logits
             .iter()
@@ -546,6 +642,7 @@ fn eval_loop(
             "released": released,
             "active": active,
             "pred_intent": engine.manifest.inputs.goal.intents.get(predicted_intent_idx),
+            "value": value,
         });
         writeln!(out, "{}", record)?;
     }

@@ -48,6 +48,29 @@ reflex_train/             Python training pipeline for Reflex models
 
 ## Quick Start
 
+### Task Shortcuts (Just)
+
+Install just once:
+
+```bash
+cargo install just
+```
+
+```bash
+# Record a run
+just record
+
+# Label new runs (no overwrite)
+just label
+
+# Train (IQL/AWR on by default)
+just train
+
+# Train with common knobs
+just train-custom EPOCHS=50 BATCH_SIZE=32 LR=1e-4
+```
+
+
 ### System Dependencies
 
 Ubuntu/Debian:

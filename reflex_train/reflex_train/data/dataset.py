@@ -59,6 +59,24 @@ def _get_torchcodec_decoders():
         raise
 
 
+def _ensure_nchw_frames(frames: torch.Tensor) -> torch.Tensor:
+    """Normalize decoder output to (T, C, H, W) with C=3."""
+    if frames.ndim == 3:
+        # Single frame: CHW or HWC.
+        if frames.shape[0] == 3:
+            return frames.unsqueeze(0)
+        if frames.shape[-1] == 3:
+            return frames.permute(2, 0, 1).unsqueeze(0)
+        return frames.unsqueeze(0)
+    if frames.ndim == 4:
+        # Batch of frames: NCHW or NHWC.
+        if frames.shape[1] == 3:
+            return frames
+        if frames.shape[-1] == 3:
+            return frames.permute(0, 3, 1, 2)
+    return frames
+
+
 class MultiStreamDataset(Dataset):
     def __init__(
         self,
@@ -68,6 +86,7 @@ class MultiStreamDataset(Dataset):
         goal_intent: Optional[str] = None,
         action_horizon: int = 0,
         intent_labeler=None,
+        load_returns: bool = True,
     ):
         self.transform = transform
         self.context_frames = context_frames
@@ -80,6 +99,7 @@ class MultiStreamDataset(Dataset):
             )
         self.action_horizon = action_horizon
         self.intent_labeler = intent_labeler
+        self.load_returns = load_returns
 
         self.samples = []
 
@@ -94,6 +114,8 @@ class MultiStreamDataset(Dataset):
         frames_log = os.path.join(session_dir, "frames.jsonl")
         inputs_log = os.path.join(session_dir, "inputs.jsonl")
         intent_log = os.path.join(session_dir, "intent.jsonl")
+        returns_log = os.path.join(session_dir, "returns.jsonl")
+        episodes_log = os.path.join(session_dir, "episodes.jsonl")
 
         if not (os.path.exists(video_path) and os.path.exists(frames_log)):
             return
@@ -117,6 +139,27 @@ class MultiStreamDataset(Dataset):
                     video_path, frame_indices, key_set_by_frame
                 )
 
+            # Load returns and episodes for RL training
+            returns_map = {}
+            episodes_list = []
+            episode_end_frames = set()
+            if self.load_returns:
+                if os.path.exists(returns_log):
+                    df_returns = pl.read_ndjson(returns_log)
+                    returns_map = {
+                        row["frame_idx"]: row["return"] for row in df_returns.to_dicts()
+                    }
+                if os.path.exists(episodes_log):
+                    df_episodes = pl.read_ndjson(episodes_log)
+                    episodes_list = df_episodes.to_dicts()
+                    episode_end_frames = {ep["end_frame"] for ep in episodes_list}
+
+            # Build episode lookup: frame_idx -> (episode_id, reward)
+            episode_lookup = {}
+            for ep in episodes_list:
+                for f in range(ep["start_frame"], ep["end_frame"] + 1):
+                    episode_lookup[f] = (ep["episode_id"], ep["reward"])
+
             for i, f_idx in enumerate(frame_indices):
                 if i < self.context_frames - 1:
                     continue
@@ -128,6 +171,11 @@ class MultiStreamDataset(Dataset):
                 label_keys = key_state_by_frame[target_i]
                 if label_keys is None:
                     label_keys = keys_to_vector(set())
+
+                current_keys = key_state_by_frame[i]
+                if current_keys is None:
+                    current_keys = keys_to_vector(set())
+
                 if intent_by_frame is not None:
                     intent = intent_by_frame[i]
                 elif self.fixed_goal is not None:
@@ -147,6 +195,14 @@ class MultiStreamDataset(Dataset):
                 label_intent = torch.tensor(INTENT_TO_IDX[intent], dtype=torch.long)
                 label_mouse = torch.tensor([0.5, 0.5])
 
+                # RL fields
+                return_value = returns_map.get(f_idx, 0.0)
+                ep_info = episode_lookup.get(f_idx, (0, 0.0))
+                episode_id, ep_reward = ep_info
+                # Reward is only non-zero at terminal frame, otherwise 0
+                reward = ep_reward if f_idx in episode_end_frames else 0.0
+                done = 1.0 if f_idx in episode_end_frames else 0.0
+
                 self.samples.append(
                     {
                         "video_path": video_path,
@@ -156,6 +212,12 @@ class MultiStreamDataset(Dataset):
                         "goal": goal_vec,
                         "label_intent": label_intent,
                         "has_next": (i < len(frame_indices) - 1),
+                        "current_keys": current_keys,
+                        # RL fields
+                        "return": return_value,
+                        "reward": reward,
+                        "done": done,
+                        "episode_id": episode_id,
                     }
                 )
         except Exception as e:
@@ -218,6 +280,8 @@ class MultiStreamDataset(Dataset):
 
         if frames is None or frames.numel() == 0:
             frames = torch.zeros((self.context_frames, 3, 224, 224), dtype=torch.uint8)
+        else:
+            frames = _ensure_nchw_frames(frames)
 
         if frames.shape[0] < self.context_frames:
             pad_count = self.context_frames - frames.shape[0]
@@ -235,6 +299,8 @@ class MultiStreamDataset(Dataset):
 
         if next_frame is None or next_frame.numel() == 0:
             next_frame = frames[-1:].clone()
+        else:
+            next_frame = _ensure_nchw_frames(next_frame)
 
         if next_frame.shape[0] > 1:
             next_frame = next_frame[:1]
@@ -262,10 +328,20 @@ class MultiStreamDataset(Dataset):
             "label_mouse": sample["label_mouse"],
             "label_intent": sample["label_intent"],
             "next_pixels": next_frame_tensor,
+            "current_keys": sample["current_keys"],
+            # RL fields
+            "return": torch.tensor(sample["return"], dtype=torch.float32),
+            "reward": torch.tensor(sample["reward"], dtype=torch.float32),
+            "done": torch.tensor(sample["done"], dtype=torch.float32),
         }
 
 
 class StreamingDataset(IterableDataset):
+    """IterableDataset that groups samples by video for better decode locality.
+
+    Properly shards data across DataLoader workers to avoid duplicate iteration.
+    """
+
     def __init__(self, subset, seed: int):
         self.subset = subset
         self.seed = seed
@@ -282,6 +358,16 @@ class StreamingDataset(IterableDataset):
 
         video_paths = list(grouped.keys())
         rng.shuffle(video_paths)
+
+        # Shard across workers to avoid each worker iterating the full dataset
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            # Split videos across workers (not frames, to preserve locality)
+            video_paths = [
+                v
+                for i, v in enumerate(video_paths)
+                if i % worker_info.num_workers == worker_info.id
+            ]
 
         for video_path in video_paths:
             frames = sorted(grouped[video_path])

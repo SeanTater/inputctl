@@ -13,6 +13,14 @@ from reflex_train.data.dataset import MultiStreamDataset, StreamingDataset
 from reflex_train.data.keys import NUM_KEYS
 from reflex_train.data.intent import INTENTS
 from reflex_train.models.reflex_net import ReflexNet
+
+
+def expectile_loss(pred, target, expectile):
+    diff = target - pred
+    weight = torch.where(diff > 0, expectile, 1.0 - expectile)
+    return (weight * diff.pow(2)).mean()
+
+
 from .metrics import RunningMetrics
 
 
@@ -82,7 +90,9 @@ def train(cfg):
     pin_memory = True
     try:
         probe = dataset[0]
-        if isinstance(probe, dict) and getattr(probe.get("pixels", None), "is_cuda", False):
+        if isinstance(probe, dict) and getattr(
+            probe.get("pixels", None), "is_cuda", False
+        ):
             pin_memory = False
     except Exception:
         pass
@@ -114,6 +124,7 @@ def train(cfg):
         context_frames=cfg.context_frames,
         goal_dim=len(INTENTS),
         num_keys=NUM_KEYS,
+        inv_dynamics=cfg.inv_dyn_enabled,
     ).to(device)
 
     if cfg.compile_model:
@@ -121,9 +132,14 @@ def train(cfg):
 
     optimizer = optim.AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=1e-4)
 
+    # Loss functions - use reduction='none' for AWR weighting
+    criterion_keys_unreduced = nn.BCEWithLogitsLoss(reduction="none")
     criterion_keys = nn.BCEWithLogitsLoss()
     criterion_mouse = nn.MSELoss()
+    criterion_intent_unreduced = nn.CrossEntropyLoss(reduction="none")
     criterion_intent = nn.CrossEntropyLoss()
+    criterion_inv_dyn = nn.BCEWithLogitsLoss()
+    criterion_value = nn.MSELoss()
 
     write_config_snapshot(cfg, cfg.checkpoint_dir)
 
@@ -150,14 +166,55 @@ def train(cfg):
             target_keys = batch["label_keys"].to(device, non_blocking=True)
             target_mouse = batch["label_mouse"].to(device, non_blocking=True)
             target_intent = batch["label_intent"].to(device, non_blocking=True)
+            target_returns = batch["return"].to(device, non_blocking=True)
+            current_keys = batch["current_keys"].to(device, non_blocking=True)
+            next_pixels = batch["next_pixels"].to(device, non_blocking=True)
 
-            keys_logit, mouse_out, _, intent_logits = model(pixels, goals)
+            keys_logit, mouse_out, inv_dyn_logits, intent_logits, value = model(
+                pixels, goals, next_pixels
+            )
 
-            loss_k = criterion_keys(keys_logit, target_keys)
+            use_iql = cfg.use_awr and target_returns.abs().sum() > 0
+            weights = torch.ones_like(target_returns)
+
+            if use_iql:
+                loss_v = expectile_loss(value, target_returns, cfg.iql_expectile)
+                with torch.no_grad():
+                    advantage = target_returns - value
+                    weights = torch.exp(advantage / cfg.iql_adv_temperature)
+                    weights = weights.clamp(max=cfg.advantage_clip)
+                    weights = weights / weights.mean()
+
+                loss_k_per_sample = criterion_keys_unreduced(
+                    keys_logit, target_keys
+                ).mean(dim=1)
+                loss_k = (loss_k_per_sample * weights).mean()
+
+                loss_i_per_sample = criterion_intent_unreduced(
+                    intent_logits, target_intent
+                )
+                loss_i = (loss_i_per_sample * weights).mean()
+            else:
+                loss_v = criterion_value(value, target_returns)
+                loss_k = criterion_keys(keys_logit, target_keys)
+                loss_i = criterion_intent(intent_logits, target_intent)
+
             loss_m = criterion_mouse(mouse_out, target_mouse)
-            loss_i = criterion_intent(intent_logits, target_intent)
 
-            loss = loss_k + loss_m + cfg.intent_weight * loss_i
+            loss_inv = torch.tensor(0.0, device=device)
+            if inv_dyn_logits is not None and cfg.inv_dyn_weight > 0:
+                inv_target = (
+                    target_keys if cfg.inv_dyn_use_action_horizon else current_keys
+                )
+                loss_inv = criterion_inv_dyn(inv_dyn_logits, inv_target)
+
+            loss = (
+                loss_k
+                + loss_m
+                + cfg.intent_weight * loss_i
+                + cfg.value_weight * loss_v
+                + cfg.inv_dyn_weight * loss_inv
+            )
 
             optimizer.zero_grad()
             loss.backward()
@@ -187,9 +244,10 @@ def train(cfg):
             model,
             val_loader,
             device,
-            criterion_keys,
+            criterion_keys_unreduced,
             criterion_mouse,
-            criterion_intent,
+            criterion_intent_unreduced,
+            criterion_inv_dyn,
             cfg,
         )
 
@@ -210,7 +268,7 @@ def train(cfg):
         torch.save(model.state_dict(), ckpt_path)
 
 
-def validate(model, loader, device, crit_k, crit_m, crit_i, cfg):
+def validate(model, loader, device, crit_k, crit_m, crit_i, crit_inv, cfg):
     model.eval()
     metrics = RunningMetrics()
     with torch.no_grad():
@@ -220,13 +278,46 @@ def validate(model, loader, device, crit_k, crit_m, crit_i, cfg):
             target_keys = batch["label_keys"].to(device, non_blocking=True)
             target_mouse = batch["label_mouse"].to(device, non_blocking=True)
             target_intent = batch["label_intent"].to(device, non_blocking=True)
+            target_returns = batch["return"].to(device, non_blocking=True)
+            current_keys = batch["current_keys"].to(device, non_blocking=True)
 
-            k, m, _, i = model(pixels, goals)
+            k, m, inv_dyn_logits, i, v = model(
+                pixels, goals, batch["next_pixels"].to(device, non_blocking=True)
+            )
+
+            use_iql = cfg.use_awr and target_returns.abs().sum() > 0
+            weights = torch.ones_like(target_returns)
+
+            if use_iql:
+                loss_v = expectile_loss(v, target_returns, cfg.iql_expectile)
+                with torch.no_grad():
+                    advantage = target_returns - v
+                    weights = torch.exp(advantage / cfg.iql_adv_temperature)
+                    weights = weights.clamp(max=cfg.advantage_clip)
+                    weights = weights / weights.mean()
+
+                loss_k = (crit_k(k, target_keys).mean(dim=1) * weights).mean()
+                loss_i = (crit_i(i, target_intent) * weights).mean()
+            else:
+                loss_v = torch.mean((v - target_returns) ** 2)
+                loss_k = crit_k(k, target_keys).mean()
+                loss_i = crit_i(i, target_intent).mean()
+
+            loss_m = crit_m(m, target_mouse)
+
+            loss_inv = torch.tensor(0.0, device=device)
+            if inv_dyn_logits is not None and cfg.inv_dyn_weight > 0:
+                inv_target = (
+                    target_keys if cfg.inv_dyn_use_action_horizon else current_keys
+                )
+                loss_inv = crit_inv(inv_dyn_logits, inv_target)
 
             loss = (
-                crit_k(k, target_keys)
-                + crit_m(m, target_mouse)
-                + cfg.intent_weight * crit_i(i, target_intent)
+                loss_k
+                + loss_m
+                + cfg.intent_weight * loss_i
+                + cfg.value_weight * loss_v
+                + cfg.inv_dyn_weight * loss_inv
             )
             metrics.update_loss(loss.item())
             metrics.update_keys(k, target_keys, cfg.key_threshold)

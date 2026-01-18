@@ -27,6 +27,20 @@ class TrainConfig(BaseSettings):
     require_intent_labels: bool = False
     compile_model: bool = False
 
+    # RL / IQL settings
+    use_awr: bool = True  # Enable IQL-style advantage weighting (legacy name)
+    gamma: float = 0.99  # Discount factor
+    awr_temperature: float = 1.0  # Deprecated: use iql_adv_temperature
+    value_weight: float = 0.5  # Weight for value loss
+    advantage_clip: float = 10.0  # Max advantage weight to prevent instability
+
+    # IQL-style / inverse dynamics knobs
+    iql_expectile: float = 0.7  # Expectile for value regression
+    iql_adv_temperature: float = 1.0  # Temperature for exp(advantage)
+    inv_dyn_weight: float = 0.2  # Weight for inverse dynamics loss
+    inv_dyn_enabled: bool = True
+    inv_dyn_use_action_horizon: bool = False
+
     @field_validator("goal_intent")
     @classmethod
     def validate_goal_intent(cls, value):

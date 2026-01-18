@@ -1,0 +1,25 @@
+DATASET_DIR := "../dataset"
+
+record DATASET_DIR=DATASET_DIR:
+  cargo run --release --bin inputctl-record -- --fps 30 --output {{DATASET_DIR}}
+
+label DATASET_DIR=DATASET_DIR:
+  uv run python precompute_intents.py --data_dir {{DATASET_DIR}} --labeler keys
+
+label-all DATASET_DIR=DATASET_DIR:
+  uv run python precompute_intents.py --data_dir {{DATASET_DIR}} --labeler keys --overwrite true
+
+train DATASET_DIR=DATASET_DIR:
+  uv run python -m reflex_train.training.train --data_dir {{DATASET_DIR}}
+
+train-awr DATASET_DIR=DATASET_DIR:
+  uv run python -m reflex_train.training.train --data_dir {{DATASET_DIR}} --use_awr true --awr_temperature 1.0 --value_weight 0.5
+
+train-no-awr DATASET_DIR=DATASET_DIR:
+  uv run python -m reflex_train.training.train --data_dir {{DATASET_DIR}} --use_awr false
+
+train-custom EPOCHS="50" BATCH_SIZE="32" LR="1e-4" DATASET_DIR=DATASET_DIR:
+  uv run python -m reflex_train.training.train --data_dir {{DATASET_DIR}} --epochs {{EPOCHS}} --batch_size {{BATCH_SIZE}} --learning_rate {{LR}}
+
+export CKPT OUT="reflex.onnx":
+  uv run python export_model.py --checkpoint {{CKPT}} --output {{OUT}}

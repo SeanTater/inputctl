@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=2.0.2",
     "nvidia-npp>=13.0.3.3",
     "onnxscript>=0.5.7",
+    "opencv-python>=4.13.0.90",
     "polars>=1.36.1",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.11.0",

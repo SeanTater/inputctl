@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
+from tqdm import tqdm
 from reflex_train.data.dataset import MultiStreamDataset
 from reflex_train.data.keys import NUM_KEYS
 from reflex_train.data.intent import INTENTS
@@ -53,8 +54,14 @@ def train(cfg):
         print("No run directories found.")
         return
 
-    if cfg.goal_intent == "INFER" and cfg.require_intent_labels and not has_intent_logs(run_dirs):
-        raise RuntimeError("No intent.jsonl found; run the weak-label precompute step first.")
+    if (
+        cfg.goal_intent == "INFER"
+        and cfg.require_intent_labels
+        and not has_intent_logs(run_dirs)
+    ):
+        raise RuntimeError(
+            "No intent.jsonl found; run the weak-label precompute step first."
+        )
 
     dataset = MultiStreamDataset(
         run_dirs=run_dirs,
@@ -69,19 +76,24 @@ def train(cfg):
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
+    loader_kwargs = {
+        "batch_size": cfg.batch_size,
+        "num_workers": cfg.workers,
+        "pin_memory": True,
+        "persistent_workers": cfg.workers > 0,
+    }
+    if cfg.workers > 0:
+        loader_kwargs["prefetch_factor"] = 2
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=cfg.batch_size,
         shuffle=True,
-        num_workers=cfg.workers,
-        pin_memory=True,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=cfg.batch_size,
         shuffle=False,
-        num_workers=cfg.workers,
-        pin_memory=True,
+        **loader_kwargs,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -92,6 +104,9 @@ def train(cfg):
         goal_dim=len(INTENTS),
         num_keys=NUM_KEYS,
     ).to(device)
+
+    if cfg.compile_model:
+        model = torch.compile(model, mode="reduce-overhead")
 
     optimizer = optim.AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=1e-4)
 
@@ -106,12 +121,22 @@ def train(cfg):
         train_metrics = RunningMetrics()
         start_time = time.time()
 
-        for batch_idx, batch in enumerate(train_loader):
-            pixels = batch["pixels"].to(device)
-            goals = batch["goal"].to(device)
-            target_keys = batch["label_keys"].to(device)
-            target_mouse = batch["label_mouse"].to(device)
-            target_intent = batch["label_intent"].to(device)
+        step_times = []
+        progress = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch}",
+            unit="batch",
+            leave=False,
+            smoothing=0.0,
+        )
+
+        for batch_idx, batch in enumerate(progress):
+            step_start = time.time()
+            pixels = batch["pixels"].to(device, non_blocking=True)
+            goals = batch["goal"].to(device, non_blocking=True)
+            target_keys = batch["label_keys"].to(device, non_blocking=True)
+            target_mouse = batch["label_mouse"].to(device, non_blocking=True)
+            target_intent = batch["label_intent"].to(device, non_blocking=True)
 
             keys_logit, mouse_out, _, intent_logits = model(pixels, goals)
 
@@ -126,16 +151,23 @@ def train(cfg):
             optimizer.step()
 
             train_metrics.update_loss(loss.item())
-            train_metrics.update_keys(keys_logit.detach(), target_keys, cfg.key_threshold)
+            train_metrics.update_keys(
+                keys_logit.detach(), target_keys, cfg.key_threshold
+            )
             train_metrics.update_intent(intent_logits.detach(), target_intent)
+
+            step_times.append(time.time() - step_start)
 
             if batch_idx % cfg.log_interval == 0:
                 summary = train_metrics.summary()
-                print(
-                    f"Epoch {epoch} [{batch_idx}/{len(train_loader)}] "
-                    f"Loss: {summary['loss']:.4f} "
-                    f"K-F1: {summary['key_f1']:.3f} "
-                    f"I-Acc: {summary['intent_acc']:.3f}"
+                avg_step = sum(step_times) / len(step_times)
+                progress.set_postfix(
+                    {
+                        "loss": f"{summary['loss']:.4f}",
+                        "k_f1": f"{summary['key_f1']:.3f}",
+                        "i_acc": f"{summary['intent_acc']:.3f}",
+                        "step_s": f"{avg_step:.2f}",
+                    }
                 )
 
         val_summary = validate(
@@ -149,12 +181,14 @@ def train(cfg):
         )
 
         elapsed = time.time() - start_time
+        avg_step = sum(step_times) / len(step_times) if step_times else 0.0
         print(
             f"Epoch {epoch} Done. "
             f"Train Loss: {train_metrics.summary()['loss']:.4f}, "
             f"Val Loss: {val_summary['loss']:.4f}, "
             f"Val K-F1: {val_summary['key_f1']:.3f}, "
             f"Val I-Acc: {val_summary['intent_acc']:.3f}. "
+            f"Step: {avg_step:.2f}s. "
             f"Time: {elapsed:.1f}s"
         )
 
@@ -168,15 +202,19 @@ def validate(model, loader, device, crit_k, crit_m, crit_i, cfg):
     metrics = RunningMetrics()
     with torch.no_grad():
         for batch in loader:
-            pixels = batch["pixels"].to(device)
-            goals = batch["goal"].to(device)
-            target_keys = batch["label_keys"].to(device)
-            target_mouse = batch["label_mouse"].to(device)
-            target_intent = batch["label_intent"].to(device)
+            pixels = batch["pixels"].to(device, non_blocking=True)
+            goals = batch["goal"].to(device, non_blocking=True)
+            target_keys = batch["label_keys"].to(device, non_blocking=True)
+            target_mouse = batch["label_mouse"].to(device, non_blocking=True)
+            target_intent = batch["label_intent"].to(device, non_blocking=True)
 
             k, m, _, i = model(pixels, goals)
 
-            loss = crit_k(k, target_keys) + crit_m(m, target_mouse) + cfg.intent_weight * crit_i(i, target_intent)
+            loss = (
+                crit_k(k, target_keys)
+                + crit_m(m, target_mouse)
+                + cfg.intent_weight * crit_i(i, target_intent)
+            )
             metrics.update_loss(loss.item())
             metrics.update_keys(k, target_keys, cfg.key_threshold)
             metrics.update_intent(i, target_intent)

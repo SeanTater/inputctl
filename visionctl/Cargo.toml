@@ -34,6 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1.10"
 axum = { version = "0.8.8", features = ["ws"] }
 tokio = { version = "1.49.0", features = ["full"] }
+async-std = "1.13"
 tower-http = { version = "0.6.8", features = ["cors", "fs"] }
 rust-embed = "8.9.0"
 mime_guess = "2.0.5"
@@ -41,7 +42,9 @@ evdev = "0.12"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
 ctrlc = "3.4"
-
+ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
+gstreamer = "0.24"
+gstreamer-app = "0.24"
 
 [dependencies.pyo3]
 workspace = true

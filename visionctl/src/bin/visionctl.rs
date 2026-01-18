@@ -101,17 +101,29 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         fps: u64,
 
+        /// x264 preset (lower CPU = faster presets)
+        #[arg(long, default_value = "ultrafast")]
+        preset: String,
+
+        /// x264 CRF (higher = smaller, less CPU)
+        #[arg(long, default_value_t = 23)]
+        crf: u8,
+
         /// Input device path (optional, will prompt if not provided)
         #[arg(long)]
         device: Option<String>,
 
-        /// Limit recording to a specific window (by title substring)
-        #[arg(long)]
-        window: Option<String>,
-
         /// Limit recording to a specific region (x,y,w,h)
         #[arg(long, value_parser = parse_region)]
         region: Option<Region>,
+
+        /// Stop recording after this many seconds
+        #[arg(long)]
+        max_seconds: Option<u64>,
+
+        /// Print performance stats every N seconds
+        #[arg(long)]
+        stats_interval: Option<u64>,
     },
 }
 
@@ -160,8 +172,7 @@ fn init_logging(verbose: u8, quiet: bool) {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> visionctl::Result<()> {
+fn main() -> visionctl::Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose, cli.quiet);
 
@@ -201,10 +212,22 @@ async fn main() -> visionctl::Result<()> {
         Some(Commands::Record {
             output,
             fps,
+            preset,
+            crf,
             device,
-            window,
             region,
-        }) => visionctl::recorder::run_recorder(output, fps, device, window, region),
+            max_seconds,
+            stats_interval,
+        }) => visionctl::recorder::run_recorder(
+            output,
+            fps,
+            preset,
+            crf,
+            device,
+            region,
+            max_seconds,
+            stats_interval,
+        ),
         None => {
             // Default: query LLM with question
             let question = if cli.question.is_empty() {

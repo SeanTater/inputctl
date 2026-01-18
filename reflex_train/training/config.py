@@ -6,6 +6,7 @@ from reflex_train.data.intent import INTENTS
 class TrainConfig(BaseSettings):
     model_config = SettingsConfigDict(
         cli_parse_args=True,
+        cli_kebab_case=True,
         env_prefix="REFLEX_TRAIN_",
     )
 
@@ -24,6 +25,7 @@ class TrainConfig(BaseSettings):
     checkpoint_dir: str = "checkpoints"
     key_threshold: float = 0.5
     require_intent_labels: bool = False
+    compile_model: bool = False
 
     @field_validator("goal_intent")
     @classmethod

@@ -15,6 +15,7 @@
 
 mod actions;
 pub mod agent;
+pub mod capture;
 pub mod config;
 pub mod debugger;
 pub mod detection;

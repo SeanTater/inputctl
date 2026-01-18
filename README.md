@@ -26,6 +26,51 @@ Inspired by [ydotool](https://github.com/ReimuNotMoe/ydotool) but designed as a 
 
 Requires access to `/dev/uinput` (run as root or configure udev rules).
 
+### System dependencies (visionctl capture)
+
+Ubuntu/Debian:
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  gstreamer1.0-tools \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly \
+  gstreamer1.0-libav \
+  libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev \
+  xdg-desktop-portal
+```
+
+Arch:
+```bash
+sudo pacman -S --needed \
+  gstreamer \
+  gst-plugins-base \
+  gst-plugins-good \
+  gst-plugins-bad \
+  gst-plugins-ugly \
+  gst-libav \
+  xdg-desktop-portal
+```
+
+Fedora:
+```bash
+sudo dnf install -y \
+  gstreamer1 \
+  gstreamer1-plugins-base \
+  gstreamer1-plugins-good \
+  gstreamer1-plugins-bad-free \
+  gstreamer1-plugins-ugly \
+  gstreamer1-libav \
+  gstreamer1-devel \
+  gstreamer1-plugins-base-devel \
+  xdg-desktop-portal
+```
+
+### Python build
+
 ```bash
 # Install build tool
 uv tool install maturin

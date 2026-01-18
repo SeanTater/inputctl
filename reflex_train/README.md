@@ -25,6 +25,10 @@ cd reflex_train
 uv sync
 ```
 
+Notes:
+- For RTX 50xx (sm_120), this project is configured to use the PyTorch `cu130` wheels (see `pyproject.toml`).
+- TorchCodec CUDA decode needs NVIDIA NPP; `uv sync` installs `nvidia-npp` automatically.
+
 ## Record data (visionctl)
 
 From the repo root:

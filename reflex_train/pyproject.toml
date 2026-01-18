@@ -6,16 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "reflex-train"
 version = "0.1.0"
 description = "Training pipeline for Reflex Agent"
-requires-python = ">=3.9"
+requires-python = ">=3.13"
 dependencies = [
     "matplotlib>=3.9.4",
     "numpy>=2.0.2",
+    "nvidia-npp>=13.0.3.3",
     "onnxscript>=0.5.7",
     "polars>=1.36.1",
-    "torchcodec>=0.7.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.11.0",
-    "torch>=2.8.0",
+    "torch>=2.9",
+    "torchcodec>=0.9.1",
     "torchvision>=0.23.0",
     "tqdm>=4.66",
 ]
@@ -23,6 +24,19 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest>=8.0"]
 
+#[tool.uv]
+#index-url = "https://download.pytorch.org/whl/cu126"
+
+#[[tool.uv.index]]
+#url = "https://download.pytorch.org/whl/cu126"
+
+#[[tool.uv.index]]
+#name = "pypi"
+#url = "https://pypi.org/simple"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["reflex_train*"]
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu130"

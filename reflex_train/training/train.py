@@ -77,9 +77,19 @@ def train(cfg):
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
+    # If pixels are already decoded onto CUDA (e.g., TorchCodec CUDA decode),
+    # DataLoader pinning will fail because only CPU tensors can be pinned.
+    pin_memory = True
+    try:
+        probe = dataset[0]
+        if isinstance(probe, dict) and getattr(probe.get("pixels", None), "is_cuda", False):
+            pin_memory = False
+    except Exception:
+        pass
+
     common_loader_kwargs = {
         "num_workers": cfg.workers,
-        "pin_memory": True,
+        "pin_memory": pin_memory,
         "persistent_workers": cfg.workers > 0,
     }
     if cfg.workers > 0:

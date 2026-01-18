@@ -1,16 +1,62 @@
+import ctypes
 import os
 import random
+from pathlib import Path
 from typing import List, Optional
 
 import polars as pl
 import torch
 from torch.utils.data import Dataset, IterableDataset
-from torchcodec.decoders import VideoDecoder  # type: ignore[import-not-found]
-
 
 from .intent import INTENT_TO_IDX, intent_to_vector
 from .keys import keys_to_vector
 from .logs import load_key_sets
+
+
+_TORCHCODEC_IMPORT_ERROR: Exception | None = None
+_TORCHCODEC_DECODERS: tuple[object, object] | None = None
+
+
+def _preload_torchcodec_deps() -> None:
+    candidates: list[Path] = []
+    try:
+        import nvidia  # type: ignore[import-not-found]
+
+        roots = [Path(p).resolve() for p in getattr(nvidia, "__path__", [])]
+        for root in roots:
+            candidates.extend(
+                [
+                    root / "cu13" / "lib" / "libnppicc.so.13",
+                    root / "npp" / "lib" / "libnppicc.so.13",
+                    root / "cu12" / "lib" / "libnppicc.so.12",
+                    root / "npp" / "lib" / "libnppicc.so.12",
+                ]
+            )
+    except Exception:
+        pass
+
+    for cand in candidates:
+        if cand.exists():
+            ctypes.CDLL(str(cand), mode=ctypes.RTLD_GLOBAL)
+            return
+
+
+def _get_torchcodec_decoders():
+    global _TORCHCODEC_DECODERS, _TORCHCODEC_IMPORT_ERROR
+    if _TORCHCODEC_DECODERS is not None:
+        return _TORCHCODEC_DECODERS
+    if _TORCHCODEC_IMPORT_ERROR is not None:
+        raise _TORCHCODEC_IMPORT_ERROR
+
+    try:
+        _preload_torchcodec_deps()
+        from torchcodec.decoders import VideoDecoder, set_cuda_backend  # type: ignore[import-not-found]
+
+        _TORCHCODEC_DECODERS = (VideoDecoder, set_cuda_backend)
+        return _TORCHCODEC_DECODERS
+    except Exception as e:
+        _TORCHCODEC_IMPORT_ERROR = e
+        raise
 
 
 class MultiStreamDataset(Dataset):
@@ -118,13 +164,41 @@ class MultiStreamDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def _get_video_decoder(self, path: str) -> VideoDecoder:
+    def _get_video_decoder(self, path: str):
+        VideoDecoder, _ = _get_torchcodec_decoders()
         if not hasattr(self, "_decoders"):
             self._decoders = {}
 
         if path not in self._decoders:
-            self._decoders[path] = VideoDecoder(path, device="cpu")
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if device == "cuda":
+                decoder, mode = self._init_cuda_decoder(path)
+                if decoder is None:
+                    if not hasattr(self, "_cuda_warned"):
+                        print("Torchcodec CUDA decode unavailable; falling back to CPU")
+                        self._cuda_warned = True
+                    self._decoders[path] = VideoDecoder(path, device="cpu")
+                else:
+                    if not hasattr(self, "_cuda_warned"):
+                        print(f"Torchcodec using CUDA decoder ({mode})")
+                        self._cuda_warned = True
+                    self._decoders[path] = decoder
+            else:
+                self._decoders[path] = VideoDecoder(path, device=device)
         return self._decoders[path]
+
+    @staticmethod
+    def _init_cuda_decoder(path: str):
+        VideoDecoder, set_cuda_backend = _get_torchcodec_decoders()
+        try:
+            with set_cuda_backend("beta"):
+                return VideoDecoder(path, device="cuda"), "beta"
+        except Exception:
+            try:
+                with set_cuda_backend("ffmpeg"):
+                    return VideoDecoder(path, device="cuda"), "ffmpeg"
+            except Exception:
+                return None, None
 
     def __getitem__(self, idx):
         sample = self.samples[idx]

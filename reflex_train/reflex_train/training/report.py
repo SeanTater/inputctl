@@ -16,6 +16,9 @@ def _build_html(results: dict, checkpoint_path: str) -> str:
     intent = results.get("intent", {})
     value = results.get("value", {})
     inv_dyn = results.get("inv_dyn")
+    temporal = results.get("temporal")
+    calibration = results.get("calibration")
+    conditional = results.get("conditional")
     intents = intent.get("intents", [])
 
     # Prepare data for charts
@@ -191,6 +194,9 @@ def _build_html(results: dict, checkpoint_path: str) -> str:
                 <a href="#intent">Intent Head</a>
                 <a href="#value">Value Head</a>
                 {"<a href='#invdyn'>Inverse Dynamics</a>" if inv_dyn else ""}
+                {"<a href='#temporal'>Temporal Coherence</a>" if temporal else ""}
+                {"<a href='#calibration'>Calibration</a>" if calibration else ""}
+                {"<a href='#conditional'>Conditional Perf</a>" if conditional else ""}
             </nav>
         </aside>
         <main class="main">
@@ -332,6 +338,9 @@ def _build_html(results: dict, checkpoint_path: str) -> str:
             </section>
 
             {_inv_dyn_section(inv_dyn) if inv_dyn else ""}
+            {_temporal_section(temporal) if temporal else ""}
+            {_calibration_section(calibration) if calibration else ""}
+            {_conditional_section(conditional) if conditional else ""}
         </main>
     </div>
 
@@ -372,6 +381,9 @@ def _build_html(results: dict, checkpoint_path: str) -> str:
             yaxis: {{ title: 'True', autorange: 'reversed' }},
             margin: {{ t: 20 }}
         }}, {{ responsive: true }});
+
+        // Calibration reliability diagram
+        {_calibration_chart_js(calibration)}
     </script>
 </body>
 </html>"""
@@ -433,5 +445,206 @@ def _inv_dyn_section(inv_dyn: dict) -> str:
                     <div class="metric-label">Exact Match</div>
                 </div>
             </div>
+        </div>
+    </section>"""
+
+
+def _temporal_section(temporal: dict) -> str:
+    chatter_rate = temporal.get("key_chatter_rate", 0)
+    chatter_class = "good" if chatter_rate < 0.1 else "warning" if chatter_rate < 0.3 else "bad"
+    stability = temporal.get("intent_stability_ratio", 0)
+    stability_class = "good" if 0.8 <= stability <= 1.2 else "warning" if 0.5 <= stability <= 1.5 else "bad"
+
+    # Top chatterers
+    chatter_per_key = temporal.get("key_chatter_per_key", {})
+    top_chatterers = sorted(chatter_per_key.items(), key=lambda x: x[1], reverse=True)[:10]
+    chatter_rows = "".join(
+        f'<tr><td>{k}</td><td class="{"bad" if v > 0.3 else "warning" if v > 0.1 else "good"}">{v:.3f}</td></tr>'
+        for k, v in top_chatterers
+    )
+
+    return f"""
+    <section id="temporal">
+        <h2>Temporal Coherence</h2>
+        <div class="explanation">
+            <strong>What this measures:</strong> How stable are predictions over time? Lower chatter means fewer flip-flops between adjacent frames.
+            Stability ratio compares predicted intent run lengths to ground truth (1.0 = perfect match).
+            Chatter &lt;0.1 is good; &gt;0.3 suggests jittery predictions.
+        </div>
+        <div class="card">
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-value {chatter_class}">{chatter_rate:.3f}</div>
+                    <div class="metric-label">Key Chatter Rate</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">{temporal.get('intent_mean_run_pred', 0):.1f}</div>
+                    <div class="metric-label">Pred Run Length</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">{temporal.get('intent_mean_run_gt', 0):.1f}</div>
+                    <div class="metric-label">GT Run Length</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value {stability_class}">{stability:.2f}</div>
+                    <div class="metric-label">Stability Ratio</div>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>Top 10 Chattiest Keys</h3>
+            <table>
+                <thead><tr><th>Key</th><th>Chatter Rate</th></tr></thead>
+                <tbody>{chatter_rows if chatter_rows else "<tr><td colspan='2'>No data</td></tr>"}</tbody>
+            </table>
+        </div>
+    </section>"""
+
+
+def _calibration_section(calibration: dict) -> str:
+    ece = calibration.get("ece", 0)
+    ece_class = "good" if ece < 0.05 else "warning" if ece < 0.1 else "bad"
+
+    # Per-key ECE table
+    per_key_ece = calibration.get("per_key_ece", {})
+    ece_rows = "".join(
+        f'<tr><td>{k}</td><td class="{"good" if v < 0.05 else "warning" if v < 0.1 else "bad"}">{v:.4f}</td></tr>'
+        for k, v in sorted(per_key_ece.items(), key=lambda x: x[1], reverse=True)
+    )
+
+    return f"""
+    <section id="calibration">
+        <h2>Calibration</h2>
+        <div class="explanation">
+            <strong>What this measures:</strong> Do predicted probabilities match actual frequencies?
+            ECE (Expected Calibration Error) &lt;0.05 is well-calibrated. The reliability diagram shows predicted probability vs actual positive rate.
+            Perfect calibration = points on diagonal.
+        </div>
+        <div class="card">
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-value {ece_class}">{ece:.4f}</div>
+                    <div class="metric-label">ECE (lower is better)</div>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>Reliability Diagram</h3>
+            <div class="chart" id="calibration-chart"></div>
+        </div>
+        <div class="card">
+            <h3>Per-Key ECE (Top 10)</h3>
+            <table>
+                <thead><tr><th>Key</th><th>ECE</th></tr></thead>
+                <tbody>{ece_rows if ece_rows else "<tr><td colspan='2'>No data</td></tr>"}</tbody>
+            </table>
+        </div>
+    </section>"""
+
+
+def _calibration_chart_js(calibration: dict | None) -> str:
+    if not calibration:
+        return ""
+
+    bins = calibration.get("bins", [])
+    if not bins:
+        return ""
+
+    bin_centers = [b["bin_center"] for b in bins]
+    mean_preds = [b["mean_pred"] for b in bins]
+    actual_freqs = [b["actual_freq"] for b in bins]
+    counts = [b["count"] for b in bins]
+
+    return f"""
+        if (document.getElementById('calibration-chart')) {{
+            Plotly.newPlot('calibration-chart', [
+                {{
+                    x: [0, 1],
+                    y: [0, 1],
+                    mode: 'lines',
+                    name: 'Perfect',
+                    line: {{ color: '#a8a8a8', dash: 'dash' }}
+                }},
+                {{
+                    x: {json.dumps(mean_preds)},
+                    y: {json.dumps(actual_freqs)},
+                    mode: 'markers+lines',
+                    name: 'Model',
+                    marker: {{ color: '#4ecca3', size: {json.dumps([max(5, min(20, c/1000)) for c in counts])} }},
+                    text: {json.dumps([f"n={c:,}" for c in counts])},
+                    hovertemplate: 'Pred: %{{x:.2f}}<br>Actual: %{{y:.2f}}<br>%{{text}}<extra></extra>'
+                }}
+            ], {{
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'transparent',
+                font: {{ color: '#e8e8e8' }},
+                xaxis: {{ title: 'Mean Predicted Probability', range: [0, 1] }},
+                yaxis: {{ title: 'Actual Positive Rate', range: [0, 1] }},
+                showlegend: true,
+                legend: {{ x: 0.02, y: 0.98 }},
+                margin: {{ t: 20 }}
+            }}, {{ responsive: true }});
+        }}
+    """
+
+
+def _conditional_section(conditional: dict) -> str:
+    # F1 by intent table
+    f1_by_intent = conditional.get("key_f1_by_intent", {})
+    intent_rows = "".join(
+        f'<tr><td>{k}</td><td class="{"good" if v > 0.7 else "warning" if v > 0.4 else "bad"}">{v:.3f}</td></tr>'
+        for k, v in sorted(f1_by_intent.items(), key=lambda x: x[1], reverse=True)
+    )
+
+    # F1 by rarity table
+    f1_by_rarity = conditional.get("key_f1_by_rarity", {})
+    rarity_rows = "".join(
+        f'<tr><td>{k}</td><td class="{"good" if v > 0.7 else "warning" if v > 0.4 else "bad"}">{v:.3f}</td></tr>'
+        for k, v in f1_by_rarity.items()
+    )
+
+    # Episode boundary metrics
+    f1_near = conditional.get("f1_near_episode_boundary", 0)
+    f1_away = conditional.get("f1_away_from_boundary", 0)
+    boundary_diff = f1_away - f1_near if f1_near > 0 and f1_away > 0 else 0
+
+    return f"""
+    <section id="conditional">
+        <h2>Conditional Performance</h2>
+        <div class="explanation">
+            <strong>What this measures:</strong> How does performance vary by context?
+            F1 by intent shows model strength per player state. F1 by key rarity shows performance on rare vs common keys.
+            Episode boundary performance compares accuracy near game-over events vs normal play.
+        </div>
+        <div class="card">
+            <h3>Episode Boundary Performance</h3>
+            <div class="metric-grid">
+                <div class="metric">
+                    <div class="metric-value">{f1_near:.3f}</div>
+                    <div class="metric-label">F1 Near Boundary (±5 frames)</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">{f1_away:.3f}</div>
+                    <div class="metric-label">F1 Away from Boundary</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value {"good" if boundary_diff < 0.05 else "warning" if boundary_diff < 0.1 else "bad"}">{boundary_diff:+.3f}</div>
+                    <div class="metric-label">Difference</div>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>Key F1 by Intent</h3>
+            <table>
+                <thead><tr><th>Intent</th><th>Key F1 (micro)</th></tr></thead>
+                <tbody>{intent_rows if intent_rows else "<tr><td colspan='2'>No data</td></tr>"}</tbody>
+            </table>
+        </div>
+        <div class="card">
+            <h3>Key F1 by Rarity</h3>
+            <table>
+                <thead><tr><th>Bucket</th><th>Key F1 (micro)</th></tr></thead>
+                <tbody>{rarity_rows if rarity_rows else "<tr><td colspan='2'>No data</td></tr>"}</tbody>
+            </table>
         </div>
     </section>"""

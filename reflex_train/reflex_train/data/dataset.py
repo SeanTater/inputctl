@@ -386,6 +386,9 @@ class MultiStreamDataset(Dataset):
             "return": torch.tensor(return_value, dtype=torch.float32),
             "reward": torch.tensor(reward, dtype=torch.float32),
             "done": torch.tensor(done, dtype=torch.float32),
+            # Metadata for temporal analysis
+            "session_idx": torch.tensor(session_idx, dtype=torch.long),
+            "sample_idx": torch.tensor(frame_i, dtype=torch.long),
         }
 
 

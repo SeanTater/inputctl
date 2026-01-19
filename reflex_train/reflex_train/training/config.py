@@ -1,19 +1,20 @@
+from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from reflex_train.data.intent import INTENTS
+import tomllib
 
 
 class TrainConfig(BaseSettings):
     model_config = SettingsConfigDict(
-        cli_parse_args=True,
-        cli_kebab_case=True,
         env_prefix="REFLEX_TRAIN_",
     )
 
     data_dir: str
     epochs: int = 10
     batch_size: int = 32
-    learning_rate: float = 1e-4
+    learning_rate: float = 0.01
+    momentum: float = 0.9
     val_split: float = 0.1
     context_frames: int = 3
     action_horizon: int = 2
@@ -44,3 +45,11 @@ class TrainConfig(BaseSettings):
         if value not in INTENTS:
             raise ValueError(f"goal_intent must be one of {INTENTS} or 'INFER'")
         return value
+
+    @classmethod
+    def from_toml(cls, path: str | Path) -> "TrainConfig":
+        """Load config from TOML file."""
+        path = Path(path)
+        with open(path, "rb") as f:
+            config_dict = tomllib.load(f)
+        return cls(**config_dict)

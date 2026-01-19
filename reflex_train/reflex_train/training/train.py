@@ -118,7 +118,13 @@ def train(cfg):
     ).to(device)
     model = torch.compile(model, mode="reduce-overhead")
 
-    optimizer = optim.AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=1e-4)
+    # SGD with foreach=True for fused optimizer operations
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=cfg.learning_rate,
+        momentum=cfg.momentum,
+        foreach=True,  # Fused multi-tensor operations
+    )
 
     # Loss functions (IQL always uses unreduced for advantage weighting)
     criterion_keys = nn.BCEWithLogitsLoss(reduction="none")

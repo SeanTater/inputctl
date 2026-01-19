@@ -387,6 +387,8 @@ class MultiStreamDataset(Dataset):
         )
 
         if needs_decode:
+            # Clear old frames before decoding new chunk (prevent memory leak)
+            self._frame_cache.clear()
             # Decode a chunk starting from the earliest frame we need
             chunk_start = min(all_indices)
             chunk_end = min(chunk_start + self.chunk_size, max(session.frame_indices) + 1)

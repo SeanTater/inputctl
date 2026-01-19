@@ -1,19 +1,15 @@
 use anyhow::{anyhow, Result};
-use arrow::array::AsArray;
 use clap::{Parser, Subcommand};
 use image::{imageops::FilterType, DynamicImage};
 use inputctl::{InputCtl, Key};
+use inputctl_capture::{capture_screenshot_image, find_window, ScreenshotOptions};
 use ndarray::{Array2, Array4};
 use ort::{init, session::Session, value::Tensor};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
-use std::collections::{HashMap, VecDeque};
-use std::fs::{self, File};
-use std::io::Read;
-use std::process::{ChildStdout, Command, Stdio};
+use std::collections::VecDeque;
+use std::fs;
 use std::thread;
 use std::time::{Duration, Instant};
-use inputctl_capture::{capture_screenshot_image, find_window, ScreenshotOptions};
 
 #[derive(Parser)]
 #[command(author, version, about = "Reflex Agent ONNX inference runner")]
@@ -55,16 +51,6 @@ enum CommandMode {
         #[arg(long, default_value_t = 10.0)]
         fps: f32,
     },
-    Eval {
-        #[arg(long)]
-        video: String,
-        #[arg(long)]
-        frames: String,
-        #[arg(long)]
-        intents: Option<String>,
-        #[arg(long, default_value = "preds.parquet")]
-        out: String,
-    },
 }
 
 #[derive(Deserialize)]
@@ -91,12 +77,6 @@ struct ManifestOutputs {
 #[derive(Deserialize)]
 struct ManifestKeys {
     keys: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct FrameEntry {
-    frame_idx: u64,
-    timestamp: Option<u128>,
 }
 
 struct InferenceEngine {
@@ -290,58 +270,6 @@ fn load_manifest_path(model: &str, override_path: &Option<String>) -> String {
     format!("{base}_manifest.json")
 }
 
-fn load_frames_log(path: &str) -> Result<Vec<FrameEntry>> {
-    let file = File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut entries = Vec::new();
-    for batch in reader {
-        let batch = batch?;
-        let frame_idx_col = batch.column_by_name("frame_idx")
-            .ok_or_else(|| anyhow!("missing frame_idx column"))?;
-        let timestamp_col = batch.column_by_name("timestamp")
-            .ok_or_else(|| anyhow!("missing timestamp column"))?;
-
-        let frame_indices = frame_idx_col.as_primitive::<arrow::datatypes::Int64Type>();
-        let timestamps = timestamp_col.as_primitive::<arrow::datatypes::Int64Type>();
-
-        for i in 0..batch.num_rows() {
-            entries.push(FrameEntry {
-                frame_idx: frame_indices.value(i) as u64,
-                timestamp: Some(timestamps.value(i) as u128),
-            });
-        }
-    }
-    Ok(entries)
-}
-
-fn load_intent_log(path: &str) -> Result<HashMap<u64, String>> {
-    let file = File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut map = HashMap::new();
-    for batch in reader {
-        let batch = batch?;
-        let frame_idx_col = batch.column_by_name("frame_idx")
-            .ok_or_else(|| anyhow!("missing frame_idx column"))?;
-        let intent_col = batch.column_by_name("intent")
-            .ok_or_else(|| anyhow!("missing intent column"))?;
-
-        let frame_indices = frame_idx_col.as_primitive::<arrow::datatypes::Int64Type>();
-        let intents = intent_col.as_string::<i32>();
-
-        for i in 0..batch.num_rows() {
-            map.insert(
-                frame_indices.value(i) as u64,
-                intents.value(i).to_string(),
-            );
-        }
-    }
-    Ok(map)
-}
-
 fn capture_live_frame(height: usize, width: usize, window: &Option<String>) -> Result<Vec<f32>> {
     let mut options = ScreenshotOptions::default();
     if let Some(title) = window {
@@ -361,45 +289,6 @@ fn capture_live_frame(height: usize, width: usize, window: &Option<String>) -> R
         out.push(pixel[2] as f32 / 255.0);
     }
     Ok(out)
-}
-
-fn spawn_ffmpeg(video: &str, height: usize, width: usize) -> Result<ChildStdout> {
-    let scale = format!("scale={width}:{height}");
-    let mut child = Command::new("ffmpeg")
-        .args([
-            "-loglevel",
-            "error",
-            "-i",
-            video,
-            "-vf",
-            &scale,
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-",
-        ])
-        .stdout(Stdio::piped())
-        .spawn()?;
-    child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("failed to capture ffmpeg stdout"))
-}
-
-fn read_ffmpeg_frame(stdout: &mut ChildStdout, frame_size: usize) -> Result<Option<Vec<f32>>> {
-    let mut buf = vec![0u8; frame_size];
-    match stdout.read_exact(&mut buf) {
-        Ok(()) => {
-            let mut out = Vec::with_capacity(frame_size);
-            for byte in buf {
-                out.push(byte as f32 / 255.0);
-            }
-            Ok(Some(out))
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-        Err(err) => Err(err.into()),
-    }
 }
 
 fn build_pixels(height: usize, width: usize, frames: &VecDeque<Vec<f32>>) -> Array4<f32> {
@@ -549,176 +438,6 @@ fn live_loop(
     }
 }
 
-fn eval_loop(
-    cli: &Cli,
-    engine: &mut InferenceEngine,
-    video: &str,
-    frames_log: &str,
-    intent_log: &Option<String>,
-    out_path: &str,
-) -> Result<()> {
-    use arrow::array::{Float32Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
-    use parquet::file::properties::WriterProperties;
-    use std::sync::Arc;
-
-    let entries = load_frames_log(frames_log)?;
-    let intent_map = if let Some(path) = intent_log {
-        Some(load_intent_log(path)?)
-    } else {
-        None
-    };
-
-    let intent_default = cli
-        .goal_intent
-        .as_ref()
-        .and_then(|name| engine.intent_index(name))
-        .unwrap_or(0);
-
-    let mut buffer: VecDeque<Vec<f32>> = VecDeque::with_capacity(3);
-    let mut state = ActionState::new(engine.manifest.outputs.keys_logits.keys.len());
-
-    let frame_size = cli.height * cli.width * 3;
-    let mut stdout = spawn_ffmpeg(video, cli.height, cli.width)?;
-
-    // Buffer results for parquet output
-    let mut frame_indices: Vec<i64> = Vec::new();
-    let mut timestamps: Vec<i64> = Vec::new();
-    let mut pressed_keys: Vec<String> = Vec::new();
-    let mut released_keys: Vec<String> = Vec::new();
-    let mut active_keys: Vec<String> = Vec::new();
-    let mut pred_intents: Vec<String> = Vec::new();
-    let mut values: Vec<f32> = Vec::new();
-
-    for entry in entries {
-        let frame = match read_ffmpeg_frame(&mut stdout, frame_size)? {
-            Some(frame) => frame,
-            None => break,
-        };
-
-        if buffer.len() == 3 {
-            buffer.pop_front();
-        }
-        buffer.push_back(frame);
-        while buffer.len() < 3 {
-            buffer.push_front(vec![0.0; frame_size]);
-        }
-
-        let intent_idx = intent_map
-            .as_ref()
-            .and_then(|map| map.get(&entry.frame_idx))
-            .and_then(|name| engine.intent_index(name))
-            .unwrap_or(intent_default);
-        let goal = engine.one_hot_goal(intent_idx);
-
-        let pixels = build_pixels(cli.height, cli.width, &buffer);
-        let (keys_logits, intent_logits, value) = engine.run(&pixels, &goal)?;
-        let delta = state.update(&keys_logits, cli.threshold, cli.debounce, cli.max_keys);
-        let predicted_intent_idx = intent_logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-
-        let pressed: Vec<&str> = delta
-            .pressed
-            .iter()
-            .filter_map(|idx| {
-                engine
-                    .manifest
-                    .outputs
-                    .keys_logits
-                    .keys
-                    .get(*idx)
-                    .map(|s| s.as_str())
-            })
-            .collect();
-        let released: Vec<&str> = delta
-            .released
-            .iter()
-            .filter_map(|idx| {
-                engine
-                    .manifest
-                    .outputs
-                    .keys_logits
-                    .keys
-                    .get(*idx)
-                    .map(|s| s.as_str())
-            })
-            .collect();
-        let active: Vec<&str> = delta
-            .active
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, on)| {
-                if *on {
-                    engine
-                        .manifest
-                        .outputs
-                        .keys_logits
-                        .keys
-                        .get(idx)
-                        .map(|s| s.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        frame_indices.push(entry.frame_idx as i64);
-        timestamps.push(entry.timestamp.unwrap_or(0) as i64);
-        pressed_keys.push(pressed.join(","));
-        released_keys.push(released.join(","));
-        active_keys.push(active.join(","));
-        pred_intents.push(
-            engine
-                .manifest
-                .inputs
-                .goal
-                .intents
-                .get(predicted_intent_idx)
-                .cloned()
-                .unwrap_or_default(),
-        );
-        values.push(value);
-    }
-
-    // Write parquet output
-    let schema = Schema::new(vec![
-        Field::new("frame_idx", DataType::Int64, false),
-        Field::new("timestamp", DataType::Int64, false),
-        Field::new("pressed", DataType::Utf8, false),
-        Field::new("released", DataType::Utf8, false),
-        Field::new("active", DataType::Utf8, false),
-        Field::new("pred_intent", DataType::Utf8, false),
-        Field::new("value", DataType::Float32, false),
-    ]);
-
-    let batch = RecordBatch::try_new(
-        Arc::new(schema.clone()),
-        vec![
-            Arc::new(Int64Array::from(frame_indices)),
-            Arc::new(Int64Array::from(timestamps)),
-            Arc::new(StringArray::from(pressed_keys)),
-            Arc::new(StringArray::from(released_keys)),
-            Arc::new(StringArray::from(active_keys)),
-            Arc::new(StringArray::from(pred_intents)),
-            Arc::new(Float32Array::from(values)),
-        ],
-    )?;
-
-    let file = File::create(out_path)?;
-    let props = WriterProperties::builder().build();
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
-    writer.write(&batch)?;
-    writer.close()?;
-
-    Ok(())
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let manifest_path = load_manifest_path(&cli.model, &cli.manifest);
@@ -726,11 +445,5 @@ fn main() -> Result<()> {
 
     match &cli.command {
         CommandMode::Live { window, fps } => live_loop(&cli, &mut engine, window, *fps),
-        CommandMode::Eval {
-            video,
-            frames,
-            intents,
-            out,
-        } => eval_loop(&cli, &mut engine, video, frames, intents, out),
     }
 }

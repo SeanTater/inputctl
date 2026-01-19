@@ -1,0 +1,521 @@
+{# Reusable macros - defined at top so they can be used throughout #}
+{% macro metric_card(value, label, format_spec="%.3f") %}
+<div class="metric">
+    <div class="metric-value">{{ format_spec|format(value) }}</div>
+    <div class="metric-label">{{ label }}</div>
+</div>
+{% endmacro %}
+
+{% macro key_row(name, metrics) %}
+<tr>
+    <td>{{ name }}</td>
+    <td class="{{ metrics.get('f1', 0)|f1_class }}">{{ "%.3f"|format(metrics.get('f1', 0)) }}</td>
+    <td>{{ "%.3f"|format(metrics.get('precision', 0)) }}</td>
+    <td>{{ "%.3f"|format(metrics.get('recall', 0)) }}</td>
+    <td>{{ "{:,}".format(metrics.get('support', 0)) }}</td>
+    <td>{{ "%.2f"|format(metrics.get('support_pct', 0)) }}%</td>
+</tr>
+{% endmacro %}
+
+{% macro intent_row(name, metrics) %}
+<tr>
+    <td>{{ name }}</td>
+    <td class="{{ metrics.get('f1', 0)|f1_class }}">{{ "%.3f"|format(metrics.get('f1', 0)) }}</td>
+    <td>{{ "%.3f"|format(metrics.get('precision', 0)) }}</td>
+    <td>{{ "%.3f"|format(metrics.get('recall', 0)) }}</td>
+    <td>{{ "{:,}".format(metrics.get('support', 0)) }}</td>
+</tr>
+{% endmacro %}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reflex Model Evaluation Report</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-card: #1f2940;
+            --text-primary: #e8e8e8;
+            --text-secondary: #a8a8a8;
+            --accent: #4ecca3;
+            --accent-dim: #3ba888;
+            --warning: #f0ad4e;
+            --danger: #d9534f;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+        .container {
+            display: flex;
+            min-height: 100vh;
+        }
+        .sidebar {
+            width: 240px;
+            background: var(--bg-secondary);
+            padding: 24px 16px;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+        }
+        .sidebar h1 {
+            font-size: 1.2rem;
+            margin-bottom: 8px;
+            color: var(--accent);
+        }
+        .sidebar .meta {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        }
+        .sidebar nav a {
+            display: block;
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+            transition: all 0.2s;
+        }
+        .sidebar nav a:hover, .sidebar nav a.active {
+            background: var(--bg-card);
+            color: var(--text-primary);
+        }
+        .main {
+            margin-left: 240px;
+            flex: 1;
+            padding: 32px;
+            max-width: 1200px;
+        }
+        section {
+            margin-bottom: 48px;
+        }
+        h2 {
+            color: var(--accent);
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--bg-card);
+        }
+        .card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 16px;
+        }
+        .metric {
+            text-align: center;
+            padding: 16px;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+        }
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: var(--accent);
+        }
+        .metric-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+        .explanation {
+            background: var(--bg-secondary);
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            border-left: 3px solid var(--accent);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--bg-secondary);
+        }
+        th {
+            color: var(--text-secondary);
+            font-weight: 500;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+        }
+        .chart {
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 16px;
+        }
+        .good { color: var(--accent); }
+        .warning { color: var(--warning); }
+        .bad { color: var(--danger); }
+        @media (max-width: 768px) {
+            .sidebar { display: none; }
+            .main { margin-left: 0; padding: 16px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <h1>Reflex Eval</h1>
+            <div class="meta">
+                Generated: {{ timestamp }}<br>
+                {% if checkpoint_name %}Checkpoint: {{ checkpoint_name }}{% endif %}
+            </div>
+            <nav>
+                {% for section_id, section_name in nav_sections %}
+                <a href="#{{ section_id }}">{{ section_name }}</a>
+                {% endfor %}
+            </nav>
+        </aside>
+        <main class="main">
+            <section id="summary">
+                <h2>Summary</h2>
+                <div class="card">
+                    <div class="metric-grid">
+                        {{ metric_card(keys.get('f1_micro', 0), "Keys F1 (micro)") }}
+                        {{ metric_card(intent.get('accuracy', 0), "Intent Accuracy") }}
+                        {{ metric_card(value.get('pearson_r', 0), "Value Correlation") }}
+                        <div class="metric">
+                            <div class="metric-value">{{ "{:,}".format(keys.get('total_samples', 0)) }}</div>
+                            <div class="metric-label">Test Samples</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="keys">
+                <h2>Keys Head (Multi-Label)</h2>
+                <div class="explanation">
+                    <strong>What this measures:</strong> The model predicts which keys should be pressed simultaneously (multi-label classification).
+                    F1 micro treats all key predictions equally, while F1 macro averages per-key F1 scores (better for rare keys).
+                    High precision means few false positives (unwanted key presses), high recall means few missed key presses.
+                </div>
+                <div class="card">
+                    <div class="metric-grid">
+                        {{ metric_card(keys.get('f1_micro', 0), "F1 Micro") }}
+                        {{ metric_card(keys.get('f1_macro', 0), "F1 Macro") }}
+                        {{ metric_card(keys.get('precision_micro', 0), "Precision") }}
+                        {{ metric_card(keys.get('recall_micro', 0), "Recall") }}
+                    </div>
+                </div>
+                <div class="card">
+                    <h3>Top Keys by Support (F1 Score)</h3>
+                    <div class="chart" id="keys-chart"></div>
+                </div>
+                <div class="card">
+                    <h3>Per-Key Breakdown</h3>
+                    <table>
+                        <thead>
+                            <tr><th>Key</th><th>F1</th><th>Precision</th><th>Recall</th><th>Support</th><th>%</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for name, metrics in per_key_table %}
+                            {{ key_row(name, metrics) }}
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="intent">
+                <h2>Intent Head (Multi-Class)</h2>
+                <div class="explanation">
+                    <strong>What this measures:</strong> The model classifies the player's current intent from {{ intents|length }} categories: {{ intents|join(', ') }}.
+                    The confusion matrix shows what the model predicts (columns) for each true intent (rows).
+                    Diagonal values are correct predictions. Look for patterns in misclassification (e.g., WAIT often confused with RUN).
+                </div>
+                <div class="card">
+                    <div class="metric-grid">
+                        {{ metric_card(intent.get('accuracy', 0), "Accuracy") }}
+                        {{ metric_card(intent.get('f1_macro', 0), "F1 Macro") }}
+                        {{ metric_card(intent.get('f1_weighted', 0), "F1 Weighted") }}
+                    </div>
+                </div>
+                <div class="card">
+                    <h3>Confusion Matrix (Row-Normalized)</h3>
+                    <div class="chart" id="intent-chart"></div>
+                </div>
+                <div class="card">
+                    <h3>Per-Intent Breakdown</h3>
+                    <table>
+                        <thead>
+                            <tr><th>Intent</th><th>F1</th><th>Precision</th><th>Recall</th><th>Support</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for name in intents %}
+                            {{ intent_row(name, intent.get('per_class', {}).get(name, {})) }}
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="value">
+                <h2>Value Head (Regression)</h2>
+                <div class="explanation">
+                    <strong>What this measures:</strong> The value head predicts expected discounted returns (how good a state is).
+                    Pearson correlation shows linear relationship; Spearman shows rank correlation (useful if relationship is monotonic but not linear).
+                    Values near 1.0 indicate strong positive correlation. MSE/MAE show average prediction error magnitude.
+                </div>
+                <div class="card">
+                    <div class="metric-grid">
+                        <div class="metric">
+                            <div class="metric-value {{ value.get('pearson_r', 0)|value_class }}">{{ "%.3f"|format(value.get('pearson_r', 0)) }}</div>
+                            <div class="metric-label">Pearson r</div>
+                        </div>
+                        {{ metric_card(value.get('spearman_r', 0), "Spearman rho") }}
+                        {{ metric_card(value.get('mse', 0), "MSE", "%.4f") }}
+                        {{ metric_card(value.get('mae', 0), "MAE", "%.4f") }}
+                    </div>
+                </div>
+            </section>
+
+            {% if inv_dyn %}
+            <section id="invdyn">
+                <h2>Inverse Dynamics Head</h2>
+                <div class="explanation">
+                    <strong>What this measures:</strong> The inverse dynamics head predicts which keys were held given two consecutive frames.
+                    Exact match accuracy requires all keys to be correctly predicted for a sample. This is a harder metric than F1.
+                </div>
+                <div class="card">
+                    <div class="metric-grid">
+                        {{ metric_card(inv_dyn.get('f1_micro', 0), "F1 Micro") }}
+                        {{ metric_card(inv_dyn.get('f1_macro', 0), "F1 Macro") }}
+                        {{ metric_card(inv_dyn.get('exact_match_accuracy', 0), "Exact Match") }}
+                    </div>
+                </div>
+            </section>
+            {% endif %}
+
+            {% if temporal %}
+            <section id="temporal">
+                <h2>Temporal Coherence</h2>
+                <div class="explanation">
+                    <strong>What this measures:</strong> How stable are predictions over time? Lower chatter means fewer flip-flops between adjacent frames.
+                    Stability ratio compares predicted intent run lengths to ground truth (1.0 = perfect match).
+                    Chatter &lt;0.1 is good; &gt;0.3 suggests jittery predictions.
+                </div>
+                <div class="card">
+                    <div class="metric-grid">
+                        <div class="metric">
+                            <div class="metric-value {{ temporal.get('key_chatter_rate', 0)|chatter_class }}">{{ "%.3f"|format(temporal.get('key_chatter_rate', 0)) }}</div>
+                            <div class="metric-label">Key Chatter Rate</div>
+                        </div>
+                        {{ metric_card(temporal.get('intent_mean_run_pred', 0), "Pred Run Length", "%.1f") }}
+                        {{ metric_card(temporal.get('intent_mean_run_gt', 0), "GT Run Length", "%.1f") }}
+                        <div class="metric">
+                            <div class="metric-value {{ temporal.get('intent_stability_ratio', 0)|stability_class }}">{{ "%.2f"|format(temporal.get('intent_stability_ratio', 0)) }}</div>
+                            <div class="metric-label">Stability Ratio</div>
+                        </div>
+                    </div>
+                </div>
+                {% if top_chatterers %}
+                <div class="card">
+                    <h3>Top 10 Chattiest Keys</h3>
+                    <table>
+                        <thead><tr><th>Key</th><th>Chatter Rate</th></tr></thead>
+                        <tbody>
+                            {% for key, rate in top_chatterers %}
+                            <tr>
+                                <td>{{ key }}</td>
+                                <td class="{{ rate|chatter_class }}">{{ "%.3f"|format(rate) }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+            </section>
+            {% endif %}
+
+            {% if calibration %}
+            <section id="calibration">
+                <h2>Calibration</h2>
+                <div class="explanation">
+                    <strong>What this measures:</strong> Do predicted probabilities match actual frequencies?
+                    ECE (Expected Calibration Error) &lt;0.05 is well-calibrated. The reliability diagram shows predicted probability vs actual positive rate.
+                    Perfect calibration = points on diagonal.
+                </div>
+                <div class="card">
+                    <div class="metric-grid">
+                        <div class="metric">
+                            <div class="metric-value {{ calibration.get('ece', 0)|ece_class }}">{{ "%.4f"|format(calibration.get('ece', 0)) }}</div>
+                            <div class="metric-label">ECE (lower is better)</div>
+                        </div>
+                    </div>
+                </div>
+                {% if calibration_chart %}
+                <div class="card">
+                    <h3>Reliability Diagram</h3>
+                    <div class="chart" id="calibration-chart"></div>
+                </div>
+                {% endif %}
+                {% if ece_table %}
+                <div class="card">
+                    <h3>Per-Key ECE (Top 10)</h3>
+                    <table>
+                        <thead><tr><th>Key</th><th>ECE</th></tr></thead>
+                        <tbody>
+                            {% for key, ece in ece_table %}
+                            <tr>
+                                <td>{{ key }}</td>
+                                <td class="{{ ece|ece_class }}">{{ "%.4f"|format(ece) }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+            </section>
+            {% endif %}
+
+            {% if conditional %}
+            <section id="conditional">
+                <h2>Conditional Performance</h2>
+                <div class="explanation">
+                    <strong>What this measures:</strong> How does performance vary by context?
+                    F1 by intent shows model strength per player state. F1 by key rarity shows performance on rare vs common keys.
+                    Episode boundary performance compares accuracy near game-over events vs normal play.
+                </div>
+                <div class="card">
+                    <h3>Episode Boundary Performance</h3>
+                    <div class="metric-grid">
+                        {{ metric_card(conditional.get('f1_near_episode_boundary', 0), "F1 Near Boundary (±5 frames)") }}
+                        {{ metric_card(conditional.get('f1_away_from_boundary', 0), "F1 Away from Boundary") }}
+                        <div class="metric">
+                            {% set boundary_diff = conditional.get('f1_away_from_boundary', 0) - conditional.get('f1_near_episode_boundary', 0) %}
+                            <div class="metric-value {{ boundary_diff|boundary_diff_class }}">{{ "%+.3f"|format(boundary_diff) }}</div>
+                            <div class="metric-label">Difference</div>
+                        </div>
+                    </div>
+                </div>
+                {% if conditional.get('key_f1_by_intent') %}
+                <div class="card">
+                    <h3>Key F1 by Intent</h3>
+                    <table>
+                        <thead><tr><th>Intent</th><th>Key F1 (micro)</th></tr></thead>
+                        <tbody>
+                            {% for intent_name, f1_score in conditional.get('key_f1_by_intent', {}).items()|sort(attribute='1', reverse=true) %}
+                            <tr>
+                                <td>{{ intent_name }}</td>
+                                <td class="{{ f1_score|f1_class }}">{{ "%.3f"|format(f1_score) }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+                {% if conditional.get('key_f1_by_rarity') %}
+                <div class="card">
+                    <h3>Key F1 by Rarity</h3>
+                    <table>
+                        <thead><tr><th>Bucket</th><th>Key F1 (micro)</th></tr></thead>
+                        <tbody>
+                            {% for bucket, f1_score in conditional.get('key_f1_by_rarity', {}).items() %}
+                            <tr>
+                                <td>{{ bucket }}</td>
+                                <td class="{{ f1_score|f1_class }}">{{ "%.3f"|format(f1_score) }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+            </section>
+            {% endif %}
+        </main>
+    </div>
+
+    <script>
+        // Keys bar chart
+        Plotly.newPlot('keys-chart', [{
+            x: {{ keys_chart.names|tojson }},
+            y: {{ keys_chart.f1_scores|tojson }},
+            type: 'bar',
+            marker: { color: '#4ecca3' },
+            text: {{ keys_chart.supports|map('format_support')|list|tojson }},
+            hoverinfo: 'text+y'
+        }], {
+            paper_bgcolor: 'transparent',
+            plot_bgcolor: 'transparent',
+            font: { color: '#e8e8e8' },
+            xaxis: { tickangle: -45 },
+            yaxis: { title: 'F1 Score', range: [0, 1] },
+            margin: { t: 20, b: 100 }
+        }, { responsive: true });
+
+        // Intent confusion matrix heatmap
+        Plotly.newPlot('intent-chart', [{
+            z: {{ intent_chart.confusion_matrix|tojson }},
+            x: {{ intent_chart.intents|tojson }},
+            y: {{ intent_chart.intents|tojson }},
+            type: 'heatmap',
+            colorscale: [[0, '#1a1a2e'], [0.5, '#3ba888'], [1, '#4ecca3']],
+            showscale: true,
+            text: {{ intent_chart.confusion_matrix_text|tojson }},
+            texttemplate: '%{text}',
+            hovertemplate: 'True: %{y}<br>Pred: %{x}<br>Rate: %{z:.2f}<extra></extra>'
+        }], {
+            paper_bgcolor: 'transparent',
+            plot_bgcolor: 'transparent',
+            font: { color: '#e8e8e8' },
+            xaxis: { title: 'Predicted', side: 'bottom' },
+            yaxis: { title: 'True', autorange: 'reversed' },
+            margin: { t: 20 }
+        }, { responsive: true });
+
+        {% if calibration_chart %}
+        // Calibration reliability diagram
+        if (document.getElementById('calibration-chart')) {
+            Plotly.newPlot('calibration-chart', [
+                {
+                    x: [0, 1],
+                    y: [0, 1],
+                    mode: 'lines',
+                    name: 'Perfect',
+                    line: { color: '#a8a8a8', dash: 'dash' }
+                },
+                {
+                    x: {{ calibration_chart.mean_preds|tojson }},
+                    y: {{ calibration_chart.actual_freqs|tojson }},
+                    mode: 'markers+lines',
+                    name: 'Model',
+                    marker: {
+                        color: '#4ecca3',
+                        size: {{ calibration_chart.counts|map('marker_size')|list|tojson }}
+                    },
+                    text: {{ calibration_chart.counts|map('format_count')|list|tojson }},
+                    hovertemplate: 'Pred: %{x:.2f}<br>Actual: %{y:.2f}<br>%{text}<extra></extra>'
+                }
+            ], {
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'transparent',
+                font: { color: '#e8e8e8' },
+                xaxis: { title: 'Mean Predicted Probability', range: [0, 1] },
+                yaxis: { title: 'Actual Positive Rate', range: [0, 1] },
+                showlegend: true,
+                legend: { x: 0.02, y: 0.98 },
+                margin: { t: 20 }
+            }, { responsive: true });
+        }
+        {% endif %}
+    </script>
+</body>
+</html>

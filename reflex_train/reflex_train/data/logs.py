@@ -5,7 +5,7 @@ import polars as pl
 def load_frame_logs(frames_log: str):
     if not os.path.exists(frames_log):
         return [], []
-    df_frames = pl.read_ndjson(frames_log)
+    df_frames = pl.read_parquet(frames_log)
     frame_timestamps = df_frames["timestamp"].to_list()
     frame_indices = df_frames["frame_idx"].to_list()
     return frame_indices, frame_timestamps
@@ -18,7 +18,7 @@ def load_key_sets(frames_log: str, inputs_log: str):
 
     key_events = []
     if os.path.exists(inputs_log):
-        df_inputs = pl.read_ndjson(inputs_log)
+        df_inputs = pl.read_parquet(inputs_log)
         df_keys = df_inputs.filter(pl.col("event_type") == "key").sort("timestamp")
         if not df_keys.is_empty():
             key_events = df_keys.to_dicts()

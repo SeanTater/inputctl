@@ -1,33 +1,103 @@
 use crate::error::{Error, Result};
 use crate::primitives::screen::Region;
+use arrow::array::{Int32Array, Int64Array, StringArray};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 use dialoguer::{theme::ColorfulTheme, Select};
 use evdev::{Device, Key};
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
 use std::fs::{self, File};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[derive(serde::Serialize)]
+#[derive(Clone)]
 struct EventRecord {
     timestamp: u128,
-    event_type: String, // "key" or "mouse"
+    event_type: String,
     key_code: Option<u16>,
     key_name: Option<String>,
-    state: Option<String>, // "down", "up", "repeat"
+    state: Option<String>,
     x: Option<i32>,
     y: Option<i32>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone)]
 struct FrameTiming {
     frame_idx: u64,
     timestamp: u128,
+}
+
+fn write_frames_parquet(path: &PathBuf, frames: &[FrameTiming]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let schema = Schema::new(vec![
+        Field::new("frame_idx", DataType::Int64, false),
+        Field::new("timestamp", DataType::Int64, false),
+    ]);
+
+    let frame_indices: Vec<i64> = frames.iter().map(|f| f.frame_idx as i64).collect();
+    let timestamps: Vec<i64> = frames.iter().map(|f| f.timestamp as i64).collect();
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(Int64Array::from(frame_indices)),
+            Arc::new(Int64Array::from(timestamps)),
+        ],
+    )?;
+
+    let file = File::create(path)?;
+    let props = WriterProperties::builder().build();
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+fn write_inputs_parquet(path: &PathBuf, events: &[EventRecord]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let schema = Schema::new(vec![
+        Field::new("timestamp", DataType::Int64, false),
+        Field::new("event_type", DataType::Utf8, false),
+        Field::new("key_code", DataType::Int32, true),
+        Field::new("key_name", DataType::Utf8, true),
+        Field::new("state", DataType::Utf8, true),
+        Field::new("x", DataType::Int32, true),
+        Field::new("y", DataType::Int32, true),
+    ]);
+
+    let timestamps: Vec<i64> = events.iter().map(|e| e.timestamp as i64).collect();
+    let event_types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+    let key_codes: Vec<Option<i32>> = events.iter().map(|e| e.key_code.map(|k| k as i32)).collect();
+    let key_names: Vec<Option<&str>> = events.iter().map(|e| e.key_name.as_deref()).collect();
+    let states: Vec<Option<&str>> = events.iter().map(|e| e.state.as_deref()).collect();
+    let xs: Vec<Option<i32>> = events.iter().map(|e| e.x).collect();
+    let ys: Vec<Option<i32>> = events.iter().map(|e| e.y).collect();
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(Int64Array::from(timestamps)),
+            Arc::new(StringArray::from(event_types)),
+            Arc::new(Int32Array::from(key_codes)),
+            Arc::new(StringArray::from(key_names)),
+            Arc::new(StringArray::from(states)),
+            Arc::new(Int32Array::from(xs)),
+            Arc::new(Int32Array::from(ys)),
+        ],
+    )?;
+
+    let file = File::create(path)?;
+    let props = WriterProperties::builder().build();
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
 }
 
 pub fn run_recorder(
@@ -91,21 +161,9 @@ pub fn run_recorder(
     })?;
     println!("Recording to: {}", session_dir.display());
 
-    let events_file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(session_dir.join("inputs.jsonl"))
-        .map_err(|e| {
-            Error::ScreenshotFailed(format!("Failed to create inputs log: {}", e))
-        })?;
-
-    let mut frame_timings_file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(session_dir.join("frames.jsonl"))
-        .map_err(|e| {
-            Error::ScreenshotFailed(format!("Failed to create frames log: {}", e))
-        })?;
+    // Buffer events in memory for parquet output
+    let input_events: Arc<Mutex<Vec<EventRecord>>> = Arc::new(Mutex::new(Vec::new()));
+    let frame_timings: Arc<Mutex<Vec<FrameTiming>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mut stats_file = if stats_interval.is_some() {
         Some(
@@ -120,14 +178,6 @@ pub fn run_recorder(
     } else {
         None
     };
-
-    let mouse_file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(session_dir.join("mouse.bin"))
-        .map_err(|e| {
-            Error::ScreenshotFailed(format!("Failed to create mouse log: {}", e))
-        })?;
 
     // 5. Start portal capture and determine dimensions from first frame
     let capture = crate::capture::PortalCapture::connect(None)?;
@@ -147,7 +197,7 @@ pub fn run_recorder(
     }
 
     // We might need to adjust the actual crop region to match these even dimensions if we changed them.
-    let final_region = if let Some(mut r) = target_region {
+    let _final_region = if let Some(mut r) = target_region {
         r.width = width;
         r.height = height;
         Some(r)
@@ -194,15 +244,9 @@ pub fn run_recorder(
     let _running_clone = running.clone();
 
     let input_running = running.clone();
+    let input_events_clone = input_events.clone();
     thread::spawn(move || {
-        monitor_input_stream(device, events_file, input_running);
-    });
-
-    let mouse_running = running.clone();
-    // Pass final_region to mouse thread for normalization
-    let region_clone = final_region;
-    thread::spawn(move || {
-        monitor_mouse_stream(mouse_file, mouse_running, region_clone);
+        monitor_input_stream(device, input_events_clone, input_running);
     });
 
     // 8. Main Rendering Loop (Frame Capture)
@@ -284,12 +328,9 @@ pub fn run_recorder(
                 .unwrap()
                 .as_millis(),
         };
-        writeln!(
-            frame_timings_file,
-            "{}",
-            serde_json::to_string(&timing).unwrap()
-        )
-        .unwrap();
+        if let Ok(mut timings) = frame_timings.lock() {
+            timings.push(timing);
+        }
 
         frame_idx += 1;
 
@@ -324,19 +365,37 @@ pub fn run_recorder(
     println!("Waiting for encoding to finish...");
     let _ = ffmpeg.wait();
 
+    // Write parquet files
+    println!("Writing parquet files...");
+    let frames = frame_timings.lock().unwrap();
+    if let Err(e) = write_frames_parquet(&session_dir.join("frames.parquet"), &frames) {
+        eprintln!("Failed to write frames.parquet: {}", e);
+    }
+    drop(frames);
+
+    let events = input_events.lock().unwrap();
+    if let Err(e) = write_inputs_parquet(&session_dir.join("inputs.parquet"), &events) {
+        eprintln!("Failed to write inputs.parquet: {}", e);
+    }
+    drop(events);
+
     println!("Recording saved to {}", session_dir.display());
     println!("Total Frames: {}", frame_idx);
 
     Ok(())
 }
 
-fn monitor_input_stream(mut device: Device, mut file: File, running: Arc<AtomicBool>) {
+fn monitor_input_stream(
+    mut device: Device,
+    events_buffer: Arc<Mutex<Vec<EventRecord>>>,
+    running: Arc<AtomicBool>,
+) {
     while running.load(Ordering::Relaxed) {
         match device.fetch_events() {
             Ok(events) => {
                 for event in events {
                     if event.event_type() == evdev::EventType::KEY {
-                        let val = event.value(); // 0=up, 1=down, 2=repeat
+                        let val = event.value();
                         let state = match val {
                             0 => "up",
                             1 => "down",
@@ -358,8 +417,9 @@ fn monitor_input_stream(mut device: Device, mut file: File, running: Arc<AtomicB
                             y: None,
                         };
 
-                        // Ignore writes errors in thread
-                        let _ = writeln!(file, "{}", serde_json::to_string(&record).unwrap());
+                        if let Ok(mut buf) = events_buffer.lock() {
+                            buf.push(record);
+                        }
                     }
                 }
             }
@@ -370,63 +430,6 @@ fn monitor_input_stream(mut device: Device, mut file: File, running: Arc<AtomicB
                 break;
             }
         }
-    }
-}
-
-fn monitor_mouse_stream(mut file: File, running: Arc<AtomicBool>, region: Option<Region>) {
-    let mut last_pos = (0, 0);
-    while running.load(Ordering::Relaxed) {
-        if let Ok(pos) = crate::primitives::find_cursor() {
-            if (pos.x, pos.y) != last_pos {
-                last_pos = (pos.x, pos.y);
-
-                // Normalize if region provided
-                // Output: [u64 ts][i32 x][i32 y]
-                // x/y will be 0-1000 if region provided, or raw pixels if not
-                // Wait, binary format usually implies consistent semantics.
-                // Let's store Normalized (0-1000) always?
-                // Or store raw pixels relative to Top-Left of region?
-                // User asked "keep mouse locations to the 0..1000 range".
-
-                let (final_x, final_y) = if let Some(r) = region {
-                    if r.contains(pos.x, pos.y) {
-                        // Normalize
-                        let nx = (pos.x - r.x) * 1000 / r.width as i32;
-                        let ny = (pos.y - r.y) * 1000 / r.height as i32;
-                        (nx, ny)
-                    } else {
-                        // Outside region
-                        // Clamp or indicate?
-                        // Let's clamp for safety
-                        let nx = ((pos.x - r.x) * 1000 / r.width as i32).clamp(0, 1000);
-                        let ny = ((pos.y - r.y) * 1000 / r.height as i32).clamp(0, 1000);
-                        (nx, ny)
-                    }
-                } else {
-                    // Full screen? We should probably normalize to screen dims then.
-                    // But we don't have screen dims here efficiently without querying.
-                    // Actually we can get them once outside loop.
-                    // For now, if no region, let's just store raw pixels,
-                    // BUT user said "0..1000 range".
-                    // If we are recording full screen, that is the region.
-                    (pos.x, pos.y) // Just fallback to raw if we don't know bounds
-                };
-
-                let ts = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-
-                let mut buf = [0u8; 16];
-                buf[0..8].copy_from_slice(&ts.to_be_bytes());
-                buf[8..12].copy_from_slice(&final_x.to_be_bytes());
-                buf[12..16].copy_from_slice(&final_y.to_be_bytes());
-
-                let _ = file.write_all(&buf);
-            }
-        }
-        // Poll at ~60Hz
-        thread::sleep(Duration::from_millis(16));
     }
 }
 

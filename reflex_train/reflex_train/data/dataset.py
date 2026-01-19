@@ -111,11 +111,11 @@ class MultiStreamDataset(Dataset):
 
     def _index_session(self, session_dir: str):
         video_path = os.path.join(session_dir, "recording.mp4")
-        frames_log = os.path.join(session_dir, "frames.jsonl")
-        inputs_log = os.path.join(session_dir, "inputs.jsonl")
-        intent_log = os.path.join(session_dir, "intent.jsonl")
-        returns_log = os.path.join(session_dir, "returns.jsonl")
-        episodes_log = os.path.join(session_dir, "episodes.jsonl")
+        frames_log = os.path.join(session_dir, "frames.parquet")
+        inputs_log = os.path.join(session_dir, "inputs.parquet")
+        intent_log = os.path.join(session_dir, "intent.parquet")
+        returns_log = os.path.join(session_dir, "returns.parquet")
+        episodes_log = os.path.join(session_dir, "episodes.parquet")
 
         if not (os.path.exists(video_path) and os.path.exists(frames_log)):
             return
@@ -129,7 +129,7 @@ class MultiStreamDataset(Dataset):
 
             intent_by_frame = None
             if os.path.exists(intent_log):
-                df_intent = pl.read_ndjson(intent_log)
+                df_intent = pl.read_parquet(intent_log)
                 intent_map = {
                     row["frame_idx"]: row["intent"] for row in df_intent.to_dicts()
                 }
@@ -145,12 +145,12 @@ class MultiStreamDataset(Dataset):
             episode_end_frames = set()
             if self.load_returns:
                 if os.path.exists(returns_log):
-                    df_returns = pl.read_ndjson(returns_log)
+                    df_returns = pl.read_parquet(returns_log)
                     returns_map = {
                         row["frame_idx"]: row["return"] for row in df_returns.to_dicts()
                     }
                 if os.path.exists(episodes_log):
-                    df_episodes = pl.read_ndjson(episodes_log)
+                    df_episodes = pl.read_parquet(episodes_log)
                     episodes_list = df_episodes.to_dicts()
                     episode_end_frames = {ep["end_frame"] for ep in episodes_list}
 

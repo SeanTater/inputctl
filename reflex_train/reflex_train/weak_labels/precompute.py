@@ -1,5 +1,6 @@
-import json
 import os
+
+import polars as pl
 from reflex_train.data.logs import load_key_sets, load_frame_logs
 from reflex_train.weak_labels import KeyWindowIntentLabeler, SuperTuxIntentLabeler
 from .config import LabelingConfig
@@ -20,48 +21,46 @@ def find_run_dirs(data_dir):
 def write_intents(path, frame_indices, frame_timestamps, intents, overwrite=False):
     if os.path.exists(path) and not overwrite:
         return False
-    with open(path, "w", encoding="utf-8") as f:
-        for pos, (idx, intent) in enumerate(zip(frame_indices, intents)):
-            entry = {"frame_idx": idx, "intent": intent}
-            if frame_timestamps:
-                entry["timestamp"] = frame_timestamps[pos]
-            f.write(json.dumps(entry) + "\n")
+    data = {"frame_idx": frame_indices, "intent": intents}
+    if frame_timestamps:
+        data["timestamp"] = frame_timestamps
+    df = pl.DataFrame(data)
+    df.write_parquet(path)
     return True
 
 
 def write_events(path, events, overwrite=False):
-    """Write detected events to JSONL file."""
+    """Write detected events to parquet file."""
     if os.path.exists(path) and not overwrite:
         return False
-    with open(path, "w", encoding="utf-8") as f:
-        for event in events:
-            entry = {
-                "frame_idx": event.frame_idx,
-                "event": event.event,
-                "confidence": event.confidence,
-            }
-            f.write(json.dumps(entry) + "\n")
+    df = pl.DataFrame({
+        "frame_idx": [e.frame_idx for e in events],
+        "event": [e.event for e in events],
+        "confidence": [e.confidence for e in events],
+    })
+    df.write_parquet(path)
     return True
 
 
 def write_episodes(path, episodes, overwrite=False):
-    """Write episode segmentation to JSONL file."""
+    """Write episode segmentation to parquet file."""
     if os.path.exists(path) and not overwrite:
         return False
-    with open(path, "w", encoding="utf-8") as f:
-        for ep in episodes:
-            f.write(json.dumps(ep.to_dict()) + "\n")
+    df = pl.DataFrame([ep.to_dict() for ep in episodes])
+    df.write_parquet(path)
     return True
 
 
 def write_returns(path, returns, overwrite=False):
-    """Write per-frame returns to JSONL file."""
+    """Write per-frame returns to parquet file."""
     if os.path.exists(path) and not overwrite:
         return False
-    with open(path, "w", encoding="utf-8") as f:
-        for frame_idx in sorted(returns.keys()):
-            entry = {"frame_idx": frame_idx, "return": returns[frame_idx]}
-            f.write(json.dumps(entry) + "\n")
+    sorted_items = sorted(returns.items())
+    df = pl.DataFrame({
+        "frame_idx": [k for k, _ in sorted_items],
+        "return": [v for _, v in sorted_items],
+    })
+    df.write_parquet(path)
     return True
 
 
@@ -107,8 +106,8 @@ def precompute(cfg: LabelingConfig):
 
     for i, run_dir in enumerate(run_dirs):
         print(f"\n[{i + 1}/{len(run_dirs)}] Processing {os.path.basename(run_dir)}")
-        frames_log = os.path.join(run_dir, "frames.jsonl")
-        inputs_log = os.path.join(run_dir, "inputs.jsonl")
+        frames_log = os.path.join(run_dir, "frames.parquet")
+        inputs_log = os.path.join(run_dir, "inputs.parquet")
         video_path = os.path.join(run_dir, "recording.mp4")
         if not os.path.exists(frames_log) or not os.path.exists(video_path):
             continue
@@ -120,7 +119,7 @@ def precompute(cfg: LabelingConfig):
 
         # Write intent labels
         intents = labeler.label_intents(video_path, frame_indices, key_sets)
-        intent_path = os.path.join(run_dir, "intent.jsonl")
+        intent_path = os.path.join(run_dir, "intent.parquet")
         wrote = write_intents(
             intent_path,
             frame_indices,
@@ -136,7 +135,7 @@ def precompute(cfg: LabelingConfig):
             total_frames = max(frame_indices) + 1 if frame_indices else 0
 
             # Detect events
-            events_path = os.path.join(run_dir, "events.jsonl")
+            events_path = os.path.join(run_dir, "events.parquet")
             events = event_detector.detect_events(video_path)
             if events is None:
                 print(f"skipped {events_path} (video corrupted)")
@@ -149,7 +148,7 @@ def precompute(cfg: LabelingConfig):
             print(f"{status} {events_path} ({n_deaths} deaths, {n_wins} wins, {n_attacks} attacks)")
 
             # Segment into episodes
-            episodes_path = os.path.join(run_dir, "episodes.jsonl")
+            episodes_path = os.path.join(run_dir, "episodes.parquet")
             episodes = segment_episodes(
                 events,
                 total_frames,
@@ -162,7 +161,7 @@ def precompute(cfg: LabelingConfig):
             print(f"{status} {episodes_path} ({len(episodes)} episodes)")
 
             # Compute returns (including attack bonuses)
-            returns_path = os.path.join(run_dir, "returns.jsonl")
+            returns_path = os.path.join(run_dir, "returns.parquet")
             returns = compute_returns(
                 episodes,
                 events=events,

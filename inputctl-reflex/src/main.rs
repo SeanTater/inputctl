@@ -1,13 +1,15 @@
 use anyhow::{anyhow, Result};
+use arrow::array::AsArray;
 use clap::{Parser, Subcommand};
 use image::{imageops::FilterType, DynamicImage};
 use inputctl::{InputCtl, Key};
 use ndarray::{Array2, Array4};
 use ort::{init, session::Session, value::Tensor};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::Read;
 use std::process::{ChildStdout, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -60,7 +62,7 @@ enum CommandMode {
         frames: String,
         #[arg(long)]
         intents: Option<String>,
-        #[arg(long, default_value = "preds.jsonl")]
+        #[arg(long, default_value = "preds.parquet")]
         out: String,
     },
 }
@@ -95,12 +97,6 @@ struct ManifestKeys {
 struct FrameEntry {
     frame_idx: u64,
     timestamp: Option<u128>,
-}
-
-#[derive(Deserialize)]
-struct IntentEntry {
-    frame_idx: u64,
-    intent: String,
 }
 
 struct InferenceEngine {
@@ -152,7 +148,7 @@ impl InferenceEngine {
         Ok((keys.row(0).to_vec(), intents.row(0).to_vec(), value[0]))
     }
 
-    fn num_intents(&self) -> usize {
+    fn _num_intents(&self) -> usize {
         self.manifest.inputs.goal.intents.len()
     }
 
@@ -222,14 +218,14 @@ impl ActionState {
         debounce: usize,
         max_keys: usize,
     ) -> ActionDelta {
-        let mut probs: Vec<(usize, f32)> = logits
+        let probs: Vec<(usize, f32)> = logits
             .iter()
             .enumerate()
             .map(|(i, v)| (i, 1.0 / (1.0 + (-v).exp())))
             .collect();
 
         let mut desired = vec![false; logits.len()];
-        for (idx, prob) in probs.iter() {
+        for (idx, prob) in &probs {
             desired[*idx] = *prob > threshold;
         }
 
@@ -296,30 +292,52 @@ fn load_manifest_path(model: &str, override_path: &Option<String>) -> String {
 
 fn load_frames_log(path: &str) -> Result<Vec<FrameEntry>> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
+
     let mut entries = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    for batch in reader {
+        let batch = batch?;
+        let frame_idx_col = batch.column_by_name("frame_idx")
+            .ok_or_else(|| anyhow!("missing frame_idx column"))?;
+        let timestamp_col = batch.column_by_name("timestamp")
+            .ok_or_else(|| anyhow!("missing timestamp column"))?;
+
+        let frame_indices = frame_idx_col.as_primitive::<arrow::datatypes::Int64Type>();
+        let timestamps = timestamp_col.as_primitive::<arrow::datatypes::Int64Type>();
+
+        for i in 0..batch.num_rows() {
+            entries.push(FrameEntry {
+                frame_idx: frame_indices.value(i) as u64,
+                timestamp: Some(timestamps.value(i) as u128),
+            });
         }
-        let entry: FrameEntry = serde_json::from_str(&line)?;
-        entries.push(entry);
     }
     Ok(entries)
 }
 
 fn load_intent_log(path: &str) -> Result<HashMap<u64, String>> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
+
     let mut map = HashMap::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    for batch in reader {
+        let batch = batch?;
+        let frame_idx_col = batch.column_by_name("frame_idx")
+            .ok_or_else(|| anyhow!("missing frame_idx column"))?;
+        let intent_col = batch.column_by_name("intent")
+            .ok_or_else(|| anyhow!("missing intent column"))?;
+
+        let frame_indices = frame_idx_col.as_primitive::<arrow::datatypes::Int64Type>();
+        let intents = intent_col.as_string::<i32>();
+
+        for i in 0..batch.num_rows() {
+            map.insert(
+                frame_indices.value(i) as u64,
+                intents.value(i).to_string(),
+            );
         }
-        let entry: IntentEntry = serde_json::from_str(&line)?;
-        map.insert(entry.frame_idx, entry.intent);
     }
     Ok(map)
 }
@@ -539,6 +557,13 @@ fn eval_loop(
     intent_log: &Option<String>,
     out_path: &str,
 ) -> Result<()> {
+    use arrow::array::{Float32Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+    use std::sync::Arc;
+
     let entries = load_frames_log(frames_log)?;
     let intent_map = if let Some(path) = intent_log {
         Some(load_intent_log(path)?)
@@ -557,7 +582,15 @@ fn eval_loop(
 
     let frame_size = cli.height * cli.width * 3;
     let mut stdout = spawn_ffmpeg(video, cli.height, cli.width)?;
-    let mut out = File::create(out_path)?;
+
+    // Buffer results for parquet output
+    let mut frame_indices: Vec<i64> = Vec::new();
+    let mut timestamps: Vec<i64> = Vec::new();
+    let mut pressed_keys: Vec<String> = Vec::new();
+    let mut released_keys: Vec<String> = Vec::new();
+    let mut active_keys: Vec<String> = Vec::new();
+    let mut pred_intents: Vec<String> = Vec::new();
+    let mut values: Vec<f32> = Vec::new();
 
     for entry in entries {
         let frame = match read_ffmpeg_frame(&mut stdout, frame_size)? {
@@ -635,17 +668,53 @@ fn eval_loop(
             })
             .collect();
 
-        let record = serde_json::json!({
-            "frame_idx": entry.frame_idx,
-            "timestamp": entry.timestamp,
-            "pressed": pressed,
-            "released": released,
-            "active": active,
-            "pred_intent": engine.manifest.inputs.goal.intents.get(predicted_intent_idx),
-            "value": value,
-        });
-        writeln!(out, "{}", record)?;
+        frame_indices.push(entry.frame_idx as i64);
+        timestamps.push(entry.timestamp.unwrap_or(0) as i64);
+        pressed_keys.push(pressed.join(","));
+        released_keys.push(released.join(","));
+        active_keys.push(active.join(","));
+        pred_intents.push(
+            engine
+                .manifest
+                .inputs
+                .goal
+                .intents
+                .get(predicted_intent_idx)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        values.push(value);
     }
+
+    // Write parquet output
+    let schema = Schema::new(vec![
+        Field::new("frame_idx", DataType::Int64, false),
+        Field::new("timestamp", DataType::Int64, false),
+        Field::new("pressed", DataType::Utf8, false),
+        Field::new("released", DataType::Utf8, false),
+        Field::new("active", DataType::Utf8, false),
+        Field::new("pred_intent", DataType::Utf8, false),
+        Field::new("value", DataType::Float32, false),
+    ]);
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(Int64Array::from(frame_indices)),
+            Arc::new(Int64Array::from(timestamps)),
+            Arc::new(StringArray::from(pressed_keys)),
+            Arc::new(StringArray::from(released_keys)),
+            Arc::new(StringArray::from(active_keys)),
+            Arc::new(StringArray::from(pred_intents)),
+            Arc::new(Float32Array::from(values)),
+        ],
+    )?;
+
+    let file = File::create(out_path)?;
+    let props = WriterProperties::builder().build();
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
+    writer.write(&batch)?;
+    writer.close()?;
 
     Ok(())
 }

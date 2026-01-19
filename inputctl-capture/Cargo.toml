@@ -43,5 +43,9 @@ anyhow = "1.0"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Parquet output
+arrow = "54"
+parquet = { version = "54", features = ["arrow"] }
+
 [features]
 default = []

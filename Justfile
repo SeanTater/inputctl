@@ -4,10 +4,10 @@ record DATASET_DIR=DATASET_DIR:
   cargo run --release --bin inputctl-record -- --fps 30 --output {{DATASET_DIR}}
 
 label DATASET_DIR=DATASET_DIR:
-  uv run --project reflex_train python reflex_train/precompute_intents.py --data-dir {{DATASET_DIR}} --labeler keys --event-stride 10 --intent-stride 10 --sparkle-threshold 0.9
+  uv run --project reflex_train python reflex_train/precompute_intents.py --data_dir {{DATASET_DIR}} --labeler keys --event_stride 10 --intent_stride 10 --sparkle_threshold 0.9
 
 label-all DATASET_DIR=DATASET_DIR:
-  uv run --project reflex_train python reflex_train/precompute_intents.py --data-dir {{DATASET_DIR}} --labeler keys --overwrite true --event-stride 10 --intent-stride 10 --sparkle-threshold 0.9
+  uv run --project reflex_train python reflex_train/precompute_intents.py --data_dir {{DATASET_DIR}} --labeler keys --overwrite true --event_stride 10 --intent_stride 10 --sparkle_threshold 0.9
 
 train DATASET_DIR=DATASET_DIR:
   uv run --project reflex_train python reflex_train/train_reflex.py --data-dir {{DATASET_DIR}} --compile-model true --workers 20

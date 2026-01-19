@@ -1,21 +1,22 @@
+from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from reflex_train.data.intent import INTENTS
+import tomllib
 
 
 class TrainConfig(BaseSettings):
     model_config = SettingsConfigDict(
-        cli_parse_args=True,
-        cli_kebab_case=True,
         env_prefix="REFLEX_TRAIN_",
     )
 
     data_dir: str
     epochs: int = 10
     batch_size: int = 32
-    learning_rate: float = 1e-4
+    learning_rate: float = 0.01
+    momentum: float = 0.9
     val_split: float = 0.1
-    workers: int = 4
+    max_steps_per_epoch: int | None = None  # Limit steps per epoch (None = full dataset)
     context_frames: int = 3
     action_horizon: int = 2
     goal_intent: str = "INFER"
@@ -25,20 +26,16 @@ class TrainConfig(BaseSettings):
     checkpoint_dir: str = "checkpoints"
     key_threshold: float = 0.5
     require_intent_labels: bool = False
-    compile_model: bool = False
 
-    # RL / IQL settings
-    use_awr: bool = True  # Enable IQL-style advantage weighting (legacy name)
+    # IQL settings (always enabled)
     gamma: float = 0.99  # Discount factor
-    awr_temperature: float = 1.0  # Deprecated: use iql_adv_temperature
     value_weight: float = 0.5  # Weight for value loss
     advantage_clip: float = 10.0  # Max advantage weight to prevent instability
-
-    # IQL-style / inverse dynamics knobs
     iql_expectile: float = 0.7  # Expectile for value regression
     iql_adv_temperature: float = 1.0  # Temperature for exp(advantage)
+
+    # Inverse dynamics (always enabled)
     inv_dyn_weight: float = 0.2  # Weight for inverse dynamics loss
-    inv_dyn_enabled: bool = True
     inv_dyn_use_action_horizon: bool = False
 
     @field_validator("goal_intent")
@@ -49,3 +46,11 @@ class TrainConfig(BaseSettings):
         if value not in INTENTS:
             raise ValueError(f"goal_intent must be one of {INTENTS} or 'INFER'")
         return value
+
+    @classmethod
+    def from_toml(cls, path: str | Path) -> "TrainConfig":
+        """Load config from TOML file."""
+        path = Path(path)
+        with open(path, "rb") as f:
+            config_dict = tomllib.load(f)
+        return cls(**config_dict)

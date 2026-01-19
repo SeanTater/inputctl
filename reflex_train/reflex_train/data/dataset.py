@@ -7,11 +7,44 @@ from typing import List, Optional
 
 import polars as pl
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, IterableDataset
 
 from .intent import INTENT_TO_IDX, intent_to_vector
 from .keys import keys_to_vector
 from .logs import load_key_sets
+
+
+# Pre-allocated normalization constants (lazily moved to correct device)
+_NORM_MEAN: torch.Tensor | None = None
+_NORM_STD: torch.Tensor | None = None
+
+
+def _get_norm_tensors(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Get normalization tensors on the correct device (cached)."""
+    global _NORM_MEAN, _NORM_STD
+    if _NORM_MEAN is None or _NORM_MEAN.device != device:
+        _NORM_MEAN = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+        _NORM_STD = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+    return _NORM_MEAN, _NORM_STD
+
+
+def batched_gpu_transform(
+    frames: torch.Tensor, size: int = 224
+) -> torch.Tensor:
+    """Fast batched GPU transform: resize + normalize.
+
+    Args:
+        frames: (N, C, H, W) uint8 tensor on any device
+        size: target size for resize
+
+    Returns:
+        (N, C, size, size) float32 normalized tensor
+    """
+    mean, std = _get_norm_tensors(frames.device)
+    x = frames.float() / 255.0
+    x = F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False)
+    return (x - mean) / std
 
 
 @dataclass
@@ -173,7 +206,7 @@ class MultiStreamDataset(Dataset):
         goal_intent: Optional[str] = None,
         action_horizon: int = 0,
         intent_labeler=None,
-        load_returns: bool = True,
+        chunk_size: int = 500,
     ):
         self.transform = transform
         self.context_frames = context_frames
@@ -186,12 +219,18 @@ class MultiStreamDataset(Dataset):
             )
         self.action_horizon = action_horizon
         self.intent_labeler = intent_labeler
-        self.load_returns = load_returns
+        self.chunk_size = chunk_size
 
         # Lazy-loaded session metadata (shared across workers via CoW)
         self.sessions: List[SessionMeta] = []
         # Lightweight sample index: (session_idx, frame_idx_in_session, target_idx_in_session, frame_idx)
         self.samples: List[tuple] = []
+
+        # Chunk cache for batch decoding
+        self._frame_cache: dict[int, torch.Tensor] = {}
+        self._cached_video_path: str | None = None
+        self._cached_chunk_start: int = -1
+        self._cached_chunk_end: int = -1
 
         print(f"Indexing {len(run_dirs)} sessions...")
         for d in run_dirs:
@@ -273,80 +312,110 @@ class MultiStreamDataset(Dataset):
             except Exception:
                 return None, None
 
-    def clear_decoders(self):
-        """Clear decoder cache. Call before forking workers."""
-        if hasattr(self, "_decoders"):
-            self._decoders.clear()
+    def _clear_frame_cache(self):
+        """Clear the frame chunk cache."""
+        self._frame_cache.clear()
+        self._cached_video_path = None
+        self._cached_chunk_start = -1
+        self._cached_chunk_end = -1
 
-    def clear_session_cache(self):
-        """Clear all lazily-loaded session data. Call before spawning workers."""
-        for s in self.sessions:
-            s._key_state_by_frame = None
-            s._intent_by_frame = None
-            s._returns_map = None
-            s._episode_lookup = None
-            s._episode_end_frames = None
+    def _decode_and_cache_chunk(self, video_path: str, start_idx: int, end_idx: int):
+        """Batch-decode a chunk of frames and cache transformed results on GPU.
+
+        Args:
+            video_path: Path to video file
+            start_idx: Starting frame index (inclusive)
+            end_idx: Ending frame index (exclusive)
+        """
+        decoder = self._get_video_decoder(video_path)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # Batch decode all frames in chunk
+        indices = list(range(start_idx, end_idx))
+        try:
+            frame_batch = decoder.get_frames_at(indices=indices)
+            frames = frame_batch.data
+        except Exception as e:
+            print(f"Failed to decode chunk {start_idx}-{end_idx}: {e}")
+            return
+
+        if frames is None or frames.numel() == 0:
+            return
+
+        frames = _ensure_nchw_frames(frames)
+
+        # Batch transform on GPU (already fast: 0.2ms per 4 frames)
+        if self.transform:
+            frames_transformed = batched_gpu_transform(frames.to(device), size=224)
+        else:
+            frames_transformed = frames.to(device).float() / 255.0
+
+        # Cache individual frames
+        for i, frame_idx in enumerate(indices):
+            if i < frames_transformed.shape[0]:
+                self._frame_cache[frame_idx] = frames_transformed[i]
+
+        # Update cache metadata
+        self._cached_video_path = video_path
+        self._cached_chunk_start = start_idx
+        self._cached_chunk_end = end_idx
 
     def __getitem__(self, idx):
         session_idx, frame_i, target_i, frame_idx = self.samples[idx]
         session = self.sessions[session_idx]
         vpath = session.video_path
         num_frames = len(session.frame_indices)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        decoder = self._get_video_decoder(vpath)
+        # Clear cache if switching videos
+        if self._cached_video_path != vpath:
+            self._clear_frame_cache()
 
+        # Determine which frames we need
         start_f = max(frame_idx - self.context_frames + 1, 0)
-        indices = list(range(start_f, start_f + self.context_frames))
-
-        try:
-            frame_batch = decoder.get_frames_at(indices=indices)
-            frames = frame_batch.data
-        except Exception:
-            frames = None
-
-        if frames is None or frames.numel() == 0:
-            frames = torch.zeros((self.context_frames, 3, 224, 224), dtype=torch.uint8)
-        else:
-            frames = _ensure_nchw_frames(frames)
-
-        if frames.shape[0] < self.context_frames:
-            pad_count = self.context_frames - frames.shape[0]
-            pad_frame = frames[-1:].repeat(pad_count, 1, 1, 1)
-            frames = torch.cat([frames, pad_frame], dim=0)
-
+        context_indices = list(range(start_f, start_f + self.context_frames))
         has_next = frame_i < num_frames - 1
-        if has_next:
-            try:
-                next_batch = decoder.get_frames_at(indices=[frame_idx + 1])
-                next_frame = next_batch.data
-            except Exception:
-                next_frame = None
+        next_idx = frame_idx + 1 if has_next else frame_idx
+
+        # Check if we need to decode a new chunk
+        all_indices = context_indices + [next_idx]
+        needs_decode = any(
+            idx not in self._frame_cache
+            for idx in all_indices
+        )
+
+        if needs_decode:
+            # Clear old frames before decoding new chunk (prevent memory leak)
+            self._frame_cache.clear()
+            # Decode a chunk starting from the earliest frame we need
+            chunk_start = min(all_indices)
+            chunk_end = min(chunk_start + self.chunk_size, max(session.frame_indices) + 1)
+            self._decode_and_cache_chunk(vpath, chunk_start, chunk_end)
+
+        # Retrieve frames from cache (or create fallback if cache failed)
+        frames = []
+        for idx in context_indices:
+            if idx in self._frame_cache:
+                frames.append(self._frame_cache[idx])
+            else:
+                # Fallback: create zero frame
+                frames.append(torch.zeros((3, 224, 224), dtype=torch.float32, device=device))
+
+        if len(frames) < self.context_frames:
+            # Pad if needed
+            pad_count = self.context_frames - len(frames)
+            pad_frame = frames[-1] if frames else torch.zeros((3, 224, 224), dtype=torch.float32, device=device)
+            frames.extend([pad_frame] * pad_count)
+
+        # Get next frame
+        if next_idx in self._frame_cache:
+            next_frame_tensor = self._frame_cache[next_idx]
         else:
-            next_frame = None
+            # Fallback: use last context frame
+            next_frame_tensor = frames[-1].clone()
 
-        if next_frame is None or next_frame.numel() == 0:
-            next_frame = frames[-1:].clone()
-        else:
-            next_frame = _ensure_nchw_frames(next_frame)
-
-        if next_frame.shape[0] > 1:
-            next_frame = next_frame[:1]
-
-        next_frame = next_frame.squeeze(0)
-
-        if self.transform:
-            tensor_frames = [self.transform(f) for f in frames]
-            input_stack = torch.cat(tensor_frames, dim=0)
-        else:
-            input_stack = frames.float() / 255.0
-            input_stack = input_stack.reshape(
-                -1, input_stack.shape[-2], input_stack.shape[-1]
-            )
-
-        if self.transform:
-            next_frame_tensor = self.transform(next_frame)
-        else:
-            next_frame_tensor = next_frame.float() / 255.0
+        # Stack context frames
+        input_stack = torch.stack(frames).reshape(-1, 224, 224)
 
         # Lazily compute labels from session metadata
         label_keys = session.get_key_state(target_i)
@@ -367,12 +436,9 @@ class MultiStreamDataset(Dataset):
         label_intent = torch.tensor(INTENT_TO_IDX[intent], dtype=torch.long)
         label_mouse = torch.tensor([0.5, 0.5])
 
-        # RL fields (lazy load)
-        if self.load_returns:
-            return_value = session.get_return(frame_idx)
-            episode_id, reward, done = session.get_episode_info(frame_idx)
-        else:
-            return_value, reward, done, episode_id = 0.0, 0.0, 0.0, 0
+        # RL fields (IQL always enabled, always load returns)
+        return_value = session.get_return(frame_idx)
+        episode_id, reward, done = session.get_episode_info(frame_idx)
 
         return {
             "pixels": input_stack,
@@ -393,10 +459,7 @@ class MultiStreamDataset(Dataset):
 
 
 class StreamingDataset(IterableDataset):
-    """IterableDataset that groups samples by video for better decode locality.
-
-    Properly shards data across DataLoader workers to avoid duplicate iteration.
-    """
+    """IterableDataset that groups samples by video for chunk cache locality."""
 
     def __init__(self, subset, seed: int):
         self.subset = subset
@@ -415,16 +478,6 @@ class StreamingDataset(IterableDataset):
 
         video_paths = list(grouped.keys())
         rng.shuffle(video_paths)
-
-        # Shard across workers to avoid each worker iterating the full dataset
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            # Split videos across workers (not frames, to preserve locality)
-            video_paths = [
-                v
-                for i, v in enumerate(video_paths)
-                if i % worker_info.num_workers == worker_info.id
-            ]
 
         for video_path in video_paths:
             frames = sorted(grouped[video_path])

@@ -206,7 +206,6 @@ class MultiStreamDataset(Dataset):
         goal_intent: Optional[str] = None,
         action_horizon: int = 0,
         intent_labeler=None,
-        load_returns: bool = True,
         chunk_size: int = 500,
     ):
         self.transform = transform
@@ -220,7 +219,6 @@ class MultiStreamDataset(Dataset):
             )
         self.action_horizon = action_horizon
         self.intent_labeler = intent_labeler
-        self.load_returns = load_returns
         self.chunk_size = chunk_size
 
         # Lazy-loaded session metadata (shared across workers via CoW)
@@ -438,12 +436,9 @@ class MultiStreamDataset(Dataset):
         label_intent = torch.tensor(INTENT_TO_IDX[intent], dtype=torch.long)
         label_mouse = torch.tensor([0.5, 0.5])
 
-        # RL fields (lazy load)
-        if self.load_returns:
-            return_value = session.get_return(frame_idx)
-            episode_id, reward, done = session.get_episode_info(frame_idx)
-        else:
-            return_value, reward, done, episode_id = 0.0, 0.0, 0.0, 0
+        # RL fields (IQL always enabled, always load returns)
+        return_value = session.get_return(frame_idx)
+        episode_id, reward, done = session.get_episode_info(frame_idx)
 
         return {
             "pixels": input_stack,

@@ -103,31 +103,52 @@ def segment_episodes(
 
 def compute_returns(
     episodes: list[Episode],
+    events: list[Event] | None = None,
     gamma: float = 0.99,
     survival_bonus: float = 0.0,
+    attack_reward: float = 0.1,
 ) -> dict[int, float]:
     """Compute discounted returns for each frame.
 
     Args:
         episodes: List of Episode objects
+        events: List of all events (including ATTACK) for intermediate rewards
         gamma: Discount factor
         survival_bonus: Small per-frame reward for staying alive
+        attack_reward: Bonus for killing/attacking enemies
 
     Returns:
         Dict mapping frame_idx -> return value
     """
+    # Build attack frame set for fast lookup
+    attack_frames = set()
+    if events and attack_reward > 0:
+        attack_frames = {e.frame_idx for e in events if e.event == "ATTACK"}
+
     returns = {}
 
     for ep in episodes:
         terminal_reward = ep.reward
         ep_length = ep.length
 
+        # Collect attack rewards within this episode
+        ep_attack_frames = [
+            f for f in attack_frames
+            if ep.start_frame <= f <= ep.end_frame
+        ]
+
         for i, frame_idx in enumerate(range(ep.start_frame, ep.end_frame + 1)):
             frames_to_end = ep_length - i - 1
 
-            # Return = discounted terminal reward + survival bonus
-            # G_t = γ^(T-t) * R_terminal + sum of survival bonuses
+            # Return = discounted terminal reward
             discounted_terminal = (gamma ** frames_to_end) * terminal_reward
+
+            # Add discounted attack rewards that occur after this frame
+            attack_return = 0.0
+            for attack_frame in ep_attack_frames:
+                if attack_frame > frame_idx:
+                    frames_to_attack = attack_frame - frame_idx
+                    attack_return += (gamma ** frames_to_attack) * attack_reward
 
             # Survival bonus contribution (geometric sum)
             if survival_bonus > 0 and frames_to_end > 0:
@@ -135,7 +156,7 @@ def compute_returns(
             else:
                 survival_return = 0.0
 
-            returns[frame_idx] = discounted_terminal + survival_return
+            returns[frame_idx] = discounted_terminal + attack_return + survival_return
 
     return returns
 

@@ -22,8 +22,6 @@ class LabelingConfig(BaseSettings):
     win_proximity_px: float = 96.0
     sparkle_threshold: float = 0.8
     win_min_frames: int = 3
-    check_every_n: int = 3  # Frame skip for death detection (3 = 3x faster)
-    win_check_every_n: int = 30
     win_llm_gate: bool = False
     win_llm_sample_stride: int = 30
     win_llm_prompt: str = (
@@ -34,7 +32,9 @@ class LabelingConfig(BaseSettings):
     win_llm_url: str = "http://localhost:11434/api/generate"
     respawn_gap: int = 30
 
+    # Rewards
     gamma: float = 0.99
     death_reward: float = -1.0
     win_reward: float = 1.0
+    attack_reward: float = 0.1  # Bonus for attacking/killing enemies
     survival_bonus: float = 0.0

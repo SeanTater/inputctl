@@ -13,10 +13,13 @@ This document describes how reflex_train moves from behavior cloning to offline 
 
 1. Record sessions into `recording.mp4`, `frames.jsonl`, `inputs.jsonl`.
 2. `precompute_intents.py` writes:
-   - `intent.jsonl` (weak intents)
-   - `events.jsonl` (death/win markers)
-   - `episodes.jsonl` + `returns.jsonl` (terminal rewards, per-frame returns)
+   - `intent.jsonl` (weak intents from sprite proximity + keypresses)
+   - `events.jsonl` (death/win/attack markers via GPU template matching)
+   - `episodes.jsonl` + `returns.jsonl` (terminal rewards + attack bonuses)
 3. Training streams frames per video so decoding stays sequential.
+
+Event detection uses **GPU-accelerated template matching** (FFT-based normalized cross-correlation)
+with torchcodec for video decoding. Falls back to CPU PyTorch if CUDA is unavailable.
 
 ## Model
 
@@ -61,15 +64,25 @@ The value head does not directly pick actions at inference time. It helps during
 To use value directly for action selection, you would need a Q-head or rollout model
 that can compare alternative actions. That is not implemented yet.
 
+## Reward structure
+
+Returns are computed with three components:
+
+- **Terminal rewards**: +1 for win, -1 for death (per episode)
+- **Attack bonuses**: +0.1 (configurable) when enemy-squashed sprites are detected
+- **Survival bonus**: optional per-frame reward for staying alive
+
+Attack detection uses template matching against "stomp/flat/squish/dead" sprite variants,
+providing denser intermediate rewards to improve value signal.
+
 ## Known gaps
 
 - No explicit Q(s,a) head; value is state-only.
 - Mouse head is placeholder (supervision is neutral).
 - Inverse dynamics is an auxiliary loss only.
-- Returns depend on win/death events; sparse reward can be noisy.
 
 ## Next steps (if needed)
 
 - Add a Q-head or advantage head to compare actions.
-- Add denser rewards (progress/score) to improve value signal.
+- Add progress-based rewards (score display OCR, position tracking).
 - Add confidence filters or curriculum runs to reduce label noise.

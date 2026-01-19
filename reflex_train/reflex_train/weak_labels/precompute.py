@@ -95,8 +95,6 @@ def precompute(cfg: LabelingConfig):
             win_proximity_px=cfg.win_proximity_px,
             sparkle_threshold=cfg.sparkle_threshold,
             win_min_frames=cfg.win_min_frames,
-            check_every_n=cfg.check_every_n,
-            win_check_every_n=cfg.win_check_every_n,
             win_llm_gate=cfg.win_llm_gate,
             win_llm_sample_stride=cfg.win_llm_sample_stride,
             win_llm_prompt=cfg.win_llm_prompt,
@@ -145,7 +143,8 @@ def precompute(cfg: LabelingConfig):
             status = "wrote" if wrote else "skipped"
             n_deaths = sum(1 for e in events if e.event == "DEATH")
             n_wins = sum(1 for e in events if e.event == "WIN")
-            print(f"{status} {events_path} ({n_deaths} deaths, {n_wins} wins)")
+            n_attacks = sum(1 for e in events if e.event == "ATTACK")
+            print(f"{status} {events_path} ({n_deaths} deaths, {n_wins} wins, {n_attacks} attacks)")
 
             # Segment into episodes
             episodes_path = os.path.join(run_dir, "episodes.jsonl")
@@ -160,10 +159,14 @@ def precompute(cfg: LabelingConfig):
             status = "wrote" if wrote else "skipped"
             print(f"{status} {episodes_path} ({len(episodes)} episodes)")
 
-            # Compute returns
+            # Compute returns (including attack bonuses)
             returns_path = os.path.join(run_dir, "returns.jsonl")
             returns = compute_returns(
-                episodes, gamma=cfg.gamma, survival_bonus=cfg.survival_bonus
+                episodes,
+                events=events,
+                gamma=cfg.gamma,
+                survival_bonus=cfg.survival_bonus,
+                attack_reward=cfg.attack_reward,
             )
             wrote = write_returns(returns_path, returns, overwrite=cfg.overwrite)
             status = "wrote" if wrote else "skipped"

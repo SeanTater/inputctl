@@ -76,14 +76,22 @@ cd reflex_train
 python precompute_intents.py --data_dir ../dataset/ --labeler supertux
 ```
 
-Outputs `intent.jsonl` next to each recording session.
+Outputs per-session label files:
+- `intent.jsonl` - weak intents (RUN, ATTACK, EVADE, etc.)
+- `events.jsonl` - death/win/attack events detected via template matching
+- `episodes.jsonl` - episode segmentation (spawn to terminal)
+- `returns.jsonl` - discounted returns with attack bonuses
 
 Key knobs:
 
 - `--intent_horizon 10` (lookahead for intent halo)
-- `--sprite_scale 0.5` (speed vs detail)
-- `--sprite_threshold 0.85`
-- `--sprite_proximity 96`
+- `--sprite_scale 0.5` (speed vs detail tradeoff)
+- `--sprite_threshold 0.85` (template match confidence)
+- `--attack_reward 0.1` (bonus for killing enemies)
+- `--death_reward -1.0` / `--win_reward 1.0`
+
+Uses GPU-accelerated template matching (FFT-based NCC) with torchcodec.
+Falls back to CPU PyTorch if CUDA is unavailable.
 
 ## Train
 

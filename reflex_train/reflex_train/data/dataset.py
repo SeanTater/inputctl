@@ -278,6 +278,15 @@ class MultiStreamDataset(Dataset):
         if hasattr(self, "_decoders"):
             self._decoders.clear()
 
+    def clear_session_cache(self):
+        """Clear all lazily-loaded session data. Call before spawning workers."""
+        for s in self.sessions:
+            s._key_state_by_frame = None
+            s._intent_by_frame = None
+            s._returns_map = None
+            s._episode_lookup = None
+            s._episode_end_frames = None
+
     def __getitem__(self, idx):
         session_idx, frame_i, target_i, frame_idx = self.samples[idx]
         session = self.sessions[session_idx]

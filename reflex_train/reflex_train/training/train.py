@@ -108,8 +108,9 @@ def train(cfg):
             pin_memory = False
     except Exception:
         pass
-    # Clear decoders created during probe to avoid CUDA context issues in workers
+    # Clear decoders and cached tensors to avoid file descriptor exhaustion in workers
     dataset.clear_decoders()
+    dataset.clear_session_cache()
 
     common_loader_kwargs = {
         "num_workers": cfg.workers,

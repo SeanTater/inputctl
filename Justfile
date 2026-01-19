@@ -10,7 +10,7 @@ label-all DATASET_DIR=DATASET_DIR:
   uv run --project reflex_train python reflex_train/precompute_intents.py --data_dir {{DATASET_DIR}} --labeler keys --overwrite true --event_stride 10 --intent_stride 10 --sparkle_threshold 0.9
 
 train DATASET_DIR=DATASET_DIR:
-  uv run --project reflex_train python reflex_train/train_reflex.py --data-dir {{DATASET_DIR}} --compile-model true --workers 20
+  uv run --project reflex_train python reflex_train/train_reflex.py --data-dir {{DATASET_DIR}} --compile-model true --workers 4
 
 train-awr DATASET_DIR=DATASET_DIR:
   uv run --project reflex_train python reflex_train/train_reflex.py --data-dir {{DATASET_DIR}} --use-awr true --awr-temperature 1.0 --value-weight 0.5

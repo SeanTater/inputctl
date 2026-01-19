@@ -16,10 +16,10 @@ train CONFIG=CONFIG_FILE:
 train-mini:
   uv run --project reflex_train python reflex_train/train_reflex.py reflex_train/configs/mini.toml
 
-train-remote DATASET_DIR=DATASET_DIR:
-  ssh sean-gallagher@intuition.local -- uv run --directory /home/sean-gallagher/sandbox/inputctl/ --project reflex_train python reflex_train/train_reflex.py {{CONFIG}}
+train-remote:
+  ssh sean-gallagher@intuition.local -- uv run --directory /home/sean-gallagher/sandbox/inputctl/ --project reflex_train python reflex_train/train_reflex.py reflex_train/configs/default.toml
 
-train-remote-mini DATASET_DIR=DATASET_DIR:
+train-remote-mini:
   ssh sean-gallagher@intuition.local -- uv run --directory /home/sean-gallagher/sandbox/inputctl/ --project reflex_train python reflex_train/train_reflex.py reflex_train/configs/mini.toml
 
   

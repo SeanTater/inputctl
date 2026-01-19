@@ -100,10 +100,12 @@ def train(cfg):
     train_loader = DataLoader(
         StreamingDataset(train_dataset, seed=cfg.seed),
         batch_size=cfg.batch_size,
+        drop_last=True,
     )
     val_loader = DataLoader(
         StreamingDataset(val_dataset, seed=cfg.seed + 1),
         batch_size=cfg.batch_size,
+        drop_last=True,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

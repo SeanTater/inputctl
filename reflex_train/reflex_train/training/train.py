@@ -97,41 +97,23 @@ def train(cfg):
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    # If pixels are already decoded onto CUDA (e.g., TorchCodec CUDA decode),
-    # DataLoader pinning will fail because only CPU tensors can be pinned.
-    pin_memory = True
-    try:
-        probe = dataset[0]
-        if isinstance(probe, dict) and getattr(
-            probe.get("pixels", None), "is_cuda", False
-        ):
-            pin_memory = False
-    except Exception:
-        pass
-    # Clear decoders and cached tensors to avoid file descriptor exhaustion in workers
+    # With chunk caching, frames are already on GPU so pin_memory not helpful
+    # Clear decoders and cached tensors before workers spawn
     dataset.clear_decoders()
     dataset.clear_session_cache()
-
-    common_loader_kwargs = {
-        "num_workers": cfg.workers,
-        "pin_memory": pin_memory,
-        "persistent_workers": cfg.workers > 0,
-    }
-    if cfg.workers > 0:
-        common_loader_kwargs["prefetch_factor"] = 2
-        # Use spawn to avoid CUDA context issues with forked processes
-        common_loader_kwargs["multiprocessing_context"] = "spawn"
 
     train_loader = DataLoader(
         StreamingDataset(train_dataset, seed=cfg.seed),
         batch_size=cfg.batch_size,
-        **common_loader_kwargs,
+        num_workers=cfg.workers,
+        pin_memory=False,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg.batch_size,
         shuffle=False,
-        **common_loader_kwargs,
+        num_workers=cfg.workers,
+        pin_memory=False,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

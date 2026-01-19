@@ -15,7 +15,7 @@ class TrainConfig(BaseSettings):
     batch_size: int = 32
     learning_rate: float = 1e-4
     val_split: float = 0.1
-    workers: int = 4
+    workers: int = 0
     context_frames: int = 3
     action_horizon: int = 2
     goal_intent: str = "INFER"
@@ -25,7 +25,7 @@ class TrainConfig(BaseSettings):
     checkpoint_dir: str = "checkpoints"
     key_threshold: float = 0.5
     require_intent_labels: bool = False
-    compile_model: bool = False
+    compile_model: bool = True
 
     # RL / IQL settings
     use_awr: bool = True  # Enable IQL-style advantage weighting (legacy name)

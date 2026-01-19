@@ -1,6 +1,7 @@
 import ctypes
 import os
 import random
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -11,6 +12,92 @@ from torch.utils.data import Dataset, IterableDataset
 from .intent import INTENT_TO_IDX, intent_to_vector
 from .keys import keys_to_vector
 from .logs import load_key_sets
+
+
+@dataclass
+class SessionMeta:
+    """Lazily-loaded metadata for a single recording session."""
+
+    session_dir: str
+    video_path: str
+    frame_indices: list  # List of frame indices from parquet
+    _key_state_by_frame: list | None = None
+    _intent_by_frame: list | None = None
+    _returns_map: dict | None = None
+    _episode_lookup: dict | None = None
+    _episode_end_frames: set | None = None
+
+    def _load_keys(self):
+        if self._key_state_by_frame is not None:
+            return
+        frames_log = os.path.join(self.session_dir, "frames.parquet")
+        inputs_log = os.path.join(self.session_dir, "inputs.parquet")
+        _, key_set_by_frame = load_key_sets(frames_log, inputs_log)
+        self._key_state_by_frame = [keys_to_vector(keys) for keys in key_set_by_frame]
+
+    def _load_intents(self, intent_labeler=None):
+        if self._intent_by_frame is not None:
+            return
+        intent_log = os.path.join(self.session_dir, "intent.parquet")
+        if os.path.exists(intent_log):
+            df_intent = pl.read_parquet(intent_log)
+            intent_map = {
+                row["frame_idx"]: row["intent"] for row in df_intent.to_dicts()
+            }
+            self._intent_by_frame = [
+                intent_map.get(idx, "WAIT") for idx in self.frame_indices
+            ]
+        elif intent_labeler is not None:
+            self._intent_by_frame = intent_labeler.label_intents(
+                self.video_path, self.frame_indices, self.key_set_by_frame
+            )
+        else:
+            self._intent_by_frame = ["WAIT"] * len(self.frame_indices)
+
+    def _load_returns(self):
+        if self._returns_map is not None:
+            return
+        returns_log = os.path.join(self.session_dir, "returns.parquet")
+        episodes_log = os.path.join(self.session_dir, "episodes.parquet")
+
+        self._returns_map = {}
+        self._episode_lookup = {}
+        self._episode_end_frames = set()
+
+        if os.path.exists(returns_log):
+            df_returns = pl.read_parquet(returns_log)
+            self._returns_map = {
+                row["frame_idx"]: row["return"] for row in df_returns.to_dicts()
+            }
+
+        if os.path.exists(episodes_log):
+            df_episodes = pl.read_parquet(episodes_log)
+            episodes_list = df_episodes.to_dicts()
+            self._episode_end_frames = {ep["end_frame"] for ep in episodes_list}
+            for ep in episodes_list:
+                for f in range(ep["start_frame"], ep["end_frame"] + 1):
+                    self._episode_lookup[f] = (ep["episode_id"], ep["reward"])
+
+    def get_key_state(self, frame_idx_in_session: int) -> torch.Tensor:
+        self._load_keys()
+        return self._key_state_by_frame[frame_idx_in_session]
+
+    def get_intent(self, frame_idx_in_session: int, intent_labeler=None) -> str:
+        self._load_intents(intent_labeler)
+        intent = self._intent_by_frame[frame_idx_in_session]
+        return intent if intent is not None else "WAIT"
+
+    def get_return(self, frame_idx: int) -> float:
+        self._load_returns()
+        return self._returns_map.get(frame_idx, 0.0)
+
+    def get_episode_info(self, frame_idx: int) -> tuple:
+        self._load_returns()
+        ep_info = self._episode_lookup.get(frame_idx, (0, 0.0))
+        episode_id, ep_reward = ep_info
+        reward = ep_reward if frame_idx in self._episode_end_frames else 0.0
+        done = 1.0 if frame_idx in self._episode_end_frames else 0.0
+        return episode_id, reward, done
 
 
 _TORCHCODEC_IMPORT_ERROR: Exception | None = None
@@ -101,125 +188,49 @@ class MultiStreamDataset(Dataset):
         self.intent_labeler = intent_labeler
         self.load_returns = load_returns
 
-        self.samples = []
+        # Lazy-loaded session metadata (shared across workers via CoW)
+        self.sessions: List[SessionMeta] = []
+        # Lightweight sample index: (session_idx, frame_idx_in_session, target_idx_in_session, frame_idx)
+        self.samples: List[tuple] = []
 
         print(f"Indexing {len(run_dirs)} sessions...")
         for d in run_dirs:
             self._index_session(d)
 
-        print(f"Indexed {len(self.samples)} samples across {len(run_dirs)} sessions.")
+        print(f"Indexed {len(self.samples)} samples across {len(self.sessions)} sessions.")
 
     def _index_session(self, session_dir: str):
         video_path = os.path.join(session_dir, "recording.mp4")
         frames_log = os.path.join(session_dir, "frames.parquet")
-        inputs_log = os.path.join(session_dir, "inputs.parquet")
-        intent_log = os.path.join(session_dir, "intent.parquet")
-        returns_log = os.path.join(session_dir, "returns.parquet")
-        episodes_log = os.path.join(session_dir, "episodes.parquet")
 
         if not (os.path.exists(video_path) and os.path.exists(frames_log)):
             return
 
         try:
-            frame_indices, key_set_by_frame = load_key_sets(frames_log, inputs_log)
+            # Only load frame indices - no heavy data yet
+            df_frames = pl.read_parquet(frames_log)
+            frame_indices = df_frames["frame_idx"].to_list()
             if not frame_indices:
                 return
 
-            key_state_by_frame = [keys_to_vector(keys) for keys in key_set_by_frame]
-
-            intent_by_frame = None
-            if os.path.exists(intent_log):
-                df_intent = pl.read_parquet(intent_log)
-                intent_map = {
-                    row["frame_idx"]: row["intent"] for row in df_intent.to_dicts()
-                }
-                intent_by_frame = [intent_map.get(idx, "WAIT") for idx in frame_indices]
-            elif self.intent_labeler is not None:
-                intent_by_frame = self.intent_labeler.label_intents(
-                    video_path, frame_indices, key_set_by_frame
+            session_idx = len(self.sessions)
+            self.sessions.append(
+                SessionMeta(
+                    session_dir=session_dir,
+                    video_path=video_path,
+                    frame_indices=frame_indices,
                 )
+            )
 
-            # Load returns and episodes for RL training
-            returns_map = {}
-            episodes_list = []
-            episode_end_frames = set()
-            if self.load_returns:
-                if os.path.exists(returns_log):
-                    df_returns = pl.read_parquet(returns_log)
-                    returns_map = {
-                        row["frame_idx"]: row["return"] for row in df_returns.to_dicts()
-                    }
-                if os.path.exists(episodes_log):
-                    df_episodes = pl.read_parquet(episodes_log)
-                    episodes_list = df_episodes.to_dicts()
-                    episode_end_frames = {ep["end_frame"] for ep in episodes_list}
-
-            # Build episode lookup: frame_idx -> (episode_id, reward)
-            episode_lookup = {}
-            for ep in episodes_list:
-                for f in range(ep["start_frame"], ep["end_frame"] + 1):
-                    episode_lookup[f] = (ep["episode_id"], ep["reward"])
-
+            # Only store lightweight indices
             for i, f_idx in enumerate(frame_indices):
                 if i < self.context_frames - 1:
                     continue
-
                 target_i = i + self.action_horizon
                 if target_i >= len(frame_indices):
                     break
-
-                label_keys = key_state_by_frame[target_i]
-                if label_keys is None:
-                    label_keys = keys_to_vector(set())
-
-                current_keys = key_state_by_frame[i]
-                if current_keys is None:
-                    current_keys = keys_to_vector(set())
-
-                if intent_by_frame is not None:
-                    intent = intent_by_frame[i]
-                elif self.fixed_goal is not None:
-                    intent = self.fixed_intent
-                else:
-                    intent = "WAIT"
-
-                if intent is None:
-                    intent = "WAIT"
-
-                goal_vec = self.fixed_goal
-                if goal_vec is None:
-                    goal_vec = torch.tensor(
-                        intent_to_vector(intent), dtype=torch.float32
-                    )
-
-                label_intent = torch.tensor(INTENT_TO_IDX[intent], dtype=torch.long)
-                label_mouse = torch.tensor([0.5, 0.5])
-
-                # RL fields
-                return_value = returns_map.get(f_idx, 0.0)
-                ep_info = episode_lookup.get(f_idx, (0, 0.0))
-                episode_id, ep_reward = ep_info
-                # Reward is only non-zero at terminal frame, otherwise 0
-                reward = ep_reward if f_idx in episode_end_frames else 0.0
-                done = 1.0 if f_idx in episode_end_frames else 0.0
-
-                self.samples.append(
-                    {
-                        "video_path": video_path,
-                        "frame_idx": f_idx,
-                        "label_keys": label_keys,
-                        "label_mouse": label_mouse,
-                        "goal": goal_vec,
-                        "label_intent": label_intent,
-                        "has_next": (i < len(frame_indices) - 1),
-                        "current_keys": current_keys,
-                        # RL fields
-                        "return": return_value,
-                        "reward": reward,
-                        "done": done,
-                        "episode_id": episode_id,
-                    }
-                )
+                # (session_idx, frame_idx_in_session, target_idx_in_session, actual_frame_idx)
+                self.samples.append((session_idx, i, target_i, f_idx))
         except Exception as e:
             print(f"Error indexing {session_dir}: {e}")
 
@@ -262,14 +273,20 @@ class MultiStreamDataset(Dataset):
             except Exception:
                 return None, None
 
+    def clear_decoders(self):
+        """Clear decoder cache. Call before forking workers."""
+        if hasattr(self, "_decoders"):
+            self._decoders.clear()
+
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        vpath = sample["video_path"]
-        current_fidx = sample["frame_idx"]
+        session_idx, frame_i, target_i, frame_idx = self.samples[idx]
+        session = self.sessions[session_idx]
+        vpath = session.video_path
+        num_frames = len(session.frame_indices)
 
         decoder = self._get_video_decoder(vpath)
 
-        start_f = max(current_fidx - self.context_frames + 1, 0)
+        start_f = max(frame_idx - self.context_frames + 1, 0)
         indices = list(range(start_f, start_f + self.context_frames))
 
         try:
@@ -288,9 +305,10 @@ class MultiStreamDataset(Dataset):
             pad_frame = frames[-1:].repeat(pad_count, 1, 1, 1)
             frames = torch.cat([frames, pad_frame], dim=0)
 
-        if sample["has_next"]:
+        has_next = frame_i < num_frames - 1
+        if has_next:
             try:
-                next_batch = decoder.get_frames_at(indices=[current_fidx + 1])
+                next_batch = decoder.get_frames_at(indices=[frame_idx + 1])
                 next_frame = next_batch.data
             except Exception:
                 next_frame = None
@@ -321,18 +339,44 @@ class MultiStreamDataset(Dataset):
         else:
             next_frame_tensor = next_frame.float() / 255.0
 
+        # Lazily compute labels from session metadata
+        label_keys = session.get_key_state(target_i)
+        if label_keys is None:
+            label_keys = keys_to_vector(set())
+
+        current_keys = session.get_key_state(frame_i)
+        if current_keys is None:
+            current_keys = keys_to_vector(set())
+
+        if self.fixed_goal is not None:
+            intent = self.fixed_intent
+            goal_vec = self.fixed_goal
+        else:
+            intent = session.get_intent(frame_i, self.intent_labeler)
+            goal_vec = torch.tensor(intent_to_vector(intent), dtype=torch.float32)
+
+        label_intent = torch.tensor(INTENT_TO_IDX[intent], dtype=torch.long)
+        label_mouse = torch.tensor([0.5, 0.5])
+
+        # RL fields (lazy load)
+        if self.load_returns:
+            return_value = session.get_return(frame_idx)
+            episode_id, reward, done = session.get_episode_info(frame_idx)
+        else:
+            return_value, reward, done, episode_id = 0.0, 0.0, 0.0, 0
+
         return {
             "pixels": input_stack,
-            "goal": sample["goal"],
-            "label_keys": sample["label_keys"],
-            "label_mouse": sample["label_mouse"],
-            "label_intent": sample["label_intent"],
+            "goal": goal_vec,
+            "label_keys": label_keys,
+            "label_mouse": label_mouse,
+            "label_intent": label_intent,
             "next_pixels": next_frame_tensor,
-            "current_keys": sample["current_keys"],
+            "current_keys": current_keys,
             # RL fields
-            "return": torch.tensor(sample["return"], dtype=torch.float32),
-            "reward": torch.tensor(sample["reward"], dtype=torch.float32),
-            "done": torch.tensor(sample["done"], dtype=torch.float32),
+            "return": torch.tensor(return_value, dtype=torch.float32),
+            "reward": torch.tensor(reward, dtype=torch.float32),
+            "done": torch.tensor(done, dtype=torch.float32),
         }
 
 
@@ -353,8 +397,9 @@ class StreamingDataset(IterableDataset):
 
         grouped = {}
         for base_idx in indices:
-            sample = base_dataset.samples[base_idx]
-            grouped.setdefault(sample["video_path"], []).append(base_idx)
+            session_idx, _, _, _ = base_dataset.samples[base_idx]
+            video_path = base_dataset.sessions[session_idx].video_path
+            grouped.setdefault(video_path, []).append(base_idx)
 
         video_paths = list(grouped.keys())
         rng.shuffle(video_paths)

@@ -8,11 +8,21 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
+from torchvision import transforms
 from tqdm import tqdm
 from reflex_train.data.dataset import MultiStreamDataset, StreamingDataset
 from reflex_train.data.keys import NUM_KEYS
 from reflex_train.data.intent import INTENTS
 from reflex_train.models.reflex_net import ReflexNet
+
+
+def get_train_transform(image_size: int = 224):
+    """Transform for training: resize and normalize."""
+    return transforms.Compose([
+        transforms.Resize((image_size, image_size), antialias=True),
+        transforms.ConvertImageDtype(torch.float32),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
 
 def expectile_loss(pred, target, expectile):
@@ -72,10 +82,12 @@ def train(cfg):
             "No intent.jsonl found; run the weak-label precompute step first."
         )
 
+    transform = get_train_transform(image_size=224)
+
     dataset = MultiStreamDataset(
         run_dirs=run_dirs,
         context_frames=cfg.context_frames,
-        transform=None,
+        transform=transform,
         goal_intent=None if cfg.goal_intent == "INFER" else cfg.goal_intent,
         action_horizon=cfg.action_horizon,
         intent_labeler=None,
@@ -96,6 +108,8 @@ def train(cfg):
             pin_memory = False
     except Exception:
         pass
+    # Clear decoders created during probe to avoid CUDA context issues in workers
+    dataset.clear_decoders()
 
     common_loader_kwargs = {
         "num_workers": cfg.workers,
@@ -104,6 +118,8 @@ def train(cfg):
     }
     if cfg.workers > 0:
         common_loader_kwargs["prefetch_factor"] = 2
+        # Use spawn to avoid CUDA context issues with forked processes
+        common_loader_kwargs["multiprocessing_context"] = "spawn"
 
     train_loader = DataLoader(
         StreamingDataset(train_dataset, seed=cfg.seed),

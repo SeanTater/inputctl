@@ -102,18 +102,24 @@ def train(cfg):
     dataset.clear_decoders()
     dataset.clear_session_cache()
 
+    # Build loader kwargs
+    loader_kwargs = {
+        "batch_size": cfg.batch_size,
+        "num_workers": cfg.workers,
+        "pin_memory": False,
+    }
+    # Use spawn to avoid CUDA context issues if using workers
+    if cfg.workers > 0:
+        loader_kwargs["multiprocessing_context"] = "spawn"
+
     train_loader = DataLoader(
         StreamingDataset(train_dataset, seed=cfg.seed),
-        batch_size=cfg.batch_size,
-        num_workers=cfg.workers,
-        pin_memory=False,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=cfg.batch_size,
         shuffle=False,
-        num_workers=cfg.workers,
-        pin_memory=False,
+        **loader_kwargs,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

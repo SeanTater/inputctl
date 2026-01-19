@@ -49,6 +49,7 @@ class EventDetector:
         win_proximity_px: float = 96.0,
         sparkle_threshold: float = 0.8,
         win_min_frames: int = 3,
+        frame_stride: int = 1,
         win_llm_gate: bool = False,
         win_llm_sample_stride: int = 30,
         win_llm_prompt: str = (
@@ -65,6 +66,7 @@ class EventDetector:
         self.win_proximity_px = win_proximity_px
         self.sparkle_threshold = sparkle_threshold
         self.win_min_frames = win_min_frames
+        self.frame_stride = frame_stride
         self.win_llm_gate = win_llm_gate
         self.win_llm_sample_stride = max(1, win_llm_sample_stride)
         self.win_llm_prompt = win_llm_prompt
@@ -167,16 +169,17 @@ class EventDetector:
         try:
             frame_results = self._scanner.detect_events(
                 video_path,
-                self.tux_templates,
-                self.death_templates,
-                self.attacked_templates,
-                self.sparkle_templates,
-                self.death_threshold,
-                self.attack_threshold,
-                self.sparkle_threshold,
-                self.win_proximity_px,
-                show_progress=show_progress,
-            )
+            self.tux_templates,
+            self.death_templates,
+            self.attacked_templates,
+            self.sparkle_templates,
+            self.death_threshold,
+            self.attack_threshold,
+            self.sparkle_threshold,
+            self.win_proximity_px,
+            frame_stride=self.frame_stride,
+            show_progress=show_progress,
+        )
         except Exception as e:
             print(f"Warning: Cannot process video {video_path}: {e}")
             return None

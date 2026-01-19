@@ -13,6 +13,7 @@ class LabelingConfig(BaseSettings):
     sprite_scale: float = 0.5
     sprite_threshold: float = 0.85
     sprite_proximity: float = 96.0
+    intent_stride: int = 1
     base_dir: str = "/usr/share/games/supertux2/images"
     overwrite: bool = False
 
@@ -22,6 +23,7 @@ class LabelingConfig(BaseSettings):
     win_proximity_px: float = 96.0
     sparkle_threshold: float = 0.8
     win_min_frames: int = 3
+    event_stride: int = 1
     win_llm_gate: bool = False
     win_llm_sample_stride: int = 30
     win_llm_prompt: str = (

@@ -37,12 +37,14 @@ class SuperTuxIntentLabeler:
         sprite_scale: float = 0.5,
         sprite_threshold: float = 0.85,
         proximity_px: float = 96.0,
+        frame_stride: int = 1,
     ):
         self.base_dir = base_dir
         self.intent_horizon = intent_horizon
         self.sprite_scale = sprite_scale
         self.sprite_threshold = sprite_threshold
         self.proximity_px = proximity_px
+        self.frame_stride = frame_stride
         self._cache: dict[str, list[dict]] = {}
 
         self._matcher = GPUTemplateMatcher()
@@ -153,6 +155,7 @@ class SuperTuxIntentLabeler:
             self.loot_templates,
             self.sprite_threshold,
             self.proximity_px,
+            frame_stride=self.frame_stride,
         )
         self._cache[video_path] = hits
         return hits

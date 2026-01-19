@@ -87,6 +87,8 @@ Key knobs:
 - `--intent_horizon 10` (lookahead for intent halo)
 - `--sprite_scale 0.5` (speed vs detail tradeoff)
 - `--sprite_threshold 0.85` (template match confidence)
+- `--intent_stride 1` (scan every Nth frame for intent labeling)
+- `--event_stride 1` (scan every Nth frame for event detection)
 - `--attack_reward 0.1` (bonus for killing enemies)
 - `--death_reward -1.0` / `--win_reward 1.0`
 

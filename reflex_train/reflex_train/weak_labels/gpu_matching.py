@@ -58,6 +58,9 @@ class GPUTemplateMatcher:
         self.device = torch.device(device)
         self.dtype = dtype
         self._template_cache: dict[str, torch.Tensor] = {}
+        self._template_stats_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        self._template_fft_cache: dict[tuple[int, int, int], torch.Tensor] = {}
+        self._ones_fft_cache: dict[tuple[int, int, int, int], torch.Tensor] = {}
 
     def load_template(self, path: str, scale: float = 1.0) -> torch.Tensor:
         """Load a template image and convert to grayscale GPU tensor.
@@ -99,6 +102,97 @@ class GPUTemplateMatcher:
             except Exception:
                 continue
         return templates
+
+    def precompute_frame_fft(
+        self, frame: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Precompute frame FFT and frame^2 FFT for reuse across templates."""
+        frame_fft = torch.fft.fft2(frame)
+        frame_sq_fft = torch.fft.fft2(frame.pow(2))
+        return frame_fft, frame_sq_fft
+
+    def _get_ones_fft(self, H: int, W: int, h: int, w: int) -> torch.Tensor:
+        """Get cached ones FFT for template size."""
+        key = (H, W, h, w)
+        if key not in self._ones_fft_cache:
+            ones = torch.zeros(H, W, device=self.device, dtype=self.dtype)
+            ones[:h, :w] = 1.0
+            self._ones_fft_cache[key] = torch.fft.fft2(ones)
+        return self._ones_fft_cache[key]
+
+    def _get_template_stats(
+        self, template: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Get cached template stats (centered, std, sum)."""
+        key = id(template)
+        if key not in self._template_stats_cache:
+            t_mean = template.mean()
+            t_centered = template - t_mean
+            t_var = t_centered.pow(2).sum()
+            t_std = t_var.sqrt()
+            t_sum = t_centered.sum()
+            self._template_stats_cache[key] = (t_centered, t_std, t_sum)
+        return self._template_stats_cache[key]
+
+    def _get_template_fft(
+        self, template: torch.Tensor, t_centered: torch.Tensor, H: int, W: int
+    ) -> torch.Tensor:
+        """Get cached FFT for centered template padded to (H, W)."""
+        key = (id(template), H, W)
+        if key not in self._template_fft_cache:
+            h, w = template.shape
+            t_padded = torch.zeros(H, W, device=self.device, dtype=self.dtype)
+            t_padded[:h, :w] = t_centered
+            self._template_fft_cache[key] = torch.fft.fft2(t_padded)
+        return self._template_fft_cache[key]
+
+    def match_template_ncc_cached(
+        self,
+        frame: torch.Tensor,
+        template: torch.Tensor,
+        frame_fft: torch.Tensor,
+        frame_sq_fft: torch.Tensor,
+    ) -> torch.Tensor:
+        """FFT-based NCC using precomputed frame FFTs.
+
+        Args:
+            frame: (H, W) grayscale frame (for shape only)
+            template: (h, w) grayscale template
+            frame_fft: Precomputed fft2(frame)
+            frame_sq_fft: Precomputed fft2(frame^2)
+
+        Returns:
+            (H-h+1, W-w+1) correlation map with values in [-1, 1]
+        """
+        H, W = frame.shape
+        h, w = template.shape
+
+        if h > H or w > W:
+            return torch.zeros(1, 1, device=self.device, dtype=self.dtype)
+
+        t_centered, t_std, t_sum = self._get_template_stats(template)
+        if t_std.item() < 1e-7:
+            return torch.zeros(H - h + 1, W - w + 1, device=self.device, dtype=self.dtype)
+
+        template_fft = self._get_template_fft(template, t_centered, H, W)
+        correlation = torch.fft.ifft2(frame_fft * template_fft.conj()).real
+
+        n_pixels = h * w
+        ones_fft = self._get_ones_fft(H, W, h, w)
+
+        local_sum = torch.fft.ifft2(frame_fft * ones_fft.conj()).real
+        local_mean = local_sum / n_pixels
+
+        local_sum_sq = torch.fft.ifft2(frame_sq_fft * ones_fft.conj()).real
+
+        local_var = local_sum_sq / n_pixels - local_mean.pow(2)
+        local_var = local_var.clamp(min=1e-7)
+        local_std = (local_var * n_pixels).sqrt()
+
+        ncc = (correlation - local_mean * t_sum) / (local_std * t_std)
+
+        result = ncc[:H - h + 1, :W - w + 1]
+        return result.clamp(-1.0, 1.0)
 
     def match_template_ncc(
         self,
@@ -244,6 +338,71 @@ class GPUTemplateMatcher:
 
         return positions
 
+    def best_match_cached(
+        self,
+        frame: torch.Tensor,
+        templates: list[tuple[torch.Tensor, str]],
+        threshold: float,
+        frame_fft: torch.Tensor,
+        frame_sq_fft: torch.Tensor,
+        early_exit: float = 0.0,
+    ) -> tuple[float, float] | None:
+        """Find best match using precomputed frame FFTs.
+
+        Args:
+            early_exit: If > 0, return immediately when score exceeds this value.
+        """
+        best_pos = None
+        best_score = threshold
+
+        for tmpl, _path in templates:
+            if tmpl.shape[0] > frame.shape[0] or tmpl.shape[1] > frame.shape[1]:
+                continue
+
+            ncc = self.match_template_ncc_cached(frame, tmpl, frame_fft, frame_sq_fft)
+            if ncc.numel() == 0:
+                continue
+
+            max_val = ncc.max().item()
+            if max_val >= best_score:
+                max_idx = ncc.argmax()
+                max_y = (max_idx // ncc.shape[1]).item()
+                max_x = (max_idx % ncc.shape[1]).item()
+                best_score = max_val
+                best_pos = (max_x + tmpl.shape[1] / 2, max_y + tmpl.shape[0] / 2)
+                if early_exit > 0 and best_score >= early_exit:
+                    return best_pos
+
+        return best_pos
+
+    def all_matches_cached(
+        self,
+        frame: torch.Tensor,
+        templates: list[tuple[torch.Tensor, str]],
+        threshold: float,
+        frame_fft: torch.Tensor,
+        frame_sq_fft: torch.Tensor,
+    ) -> list[tuple[float, float]]:
+        """Find all matches using precomputed frame FFTs."""
+        positions = []
+
+        for tmpl, _path in templates:
+            if tmpl.shape[0] > frame.shape[0] or tmpl.shape[1] > frame.shape[1]:
+                continue
+
+            ncc = self.match_template_ncc_cached(frame, tmpl, frame_fft, frame_sq_fft)
+            if ncc.numel() == 0:
+                continue
+
+            max_val = ncc.max().item()
+            if max_val >= threshold:
+                max_idx = ncc.argmax()
+                max_y = (max_idx // ncc.shape[1]).item()
+                max_x = (max_idx % ncc.shape[1]).item()
+                positions.append((max_x + tmpl.shape[1] / 2, max_y + tmpl.shape[0] / 2))
+
+        return positions
+
 
 class GPUVideoScanner:
     """Combines torchcodec GPU decoding with GPU template matching.
@@ -304,6 +463,7 @@ class GPUVideoScanner:
         loot_templates: list[tuple[torch.Tensor, str]],
         sprite_threshold: float,
         proximity_px: float,
+        frame_stride: int = 1,
         show_progress: bool = True,
     ) -> list[dict]:
         """Scan video and return per-frame sprite hit info.
@@ -317,62 +477,102 @@ class GPUVideoScanner:
         total_frames = self._get_frame_count(decoder)
         proximity = proximity_px * self.sprite_scale
 
-        hits = []
+        hits: list[dict] = []
+        stride = max(1, frame_stride)
         pbar = tqdm(total=total_frames, desc="Scanning", unit="f", disable=not show_progress)
 
-        for frame_idx in range(total_frames):
+        # Process in batches
+        batch_size = self.batch_size
+        prev_idx = None
+        prev_hit = None
+        for batch_start in range(0, total_frames, batch_size * stride):
+            batch_end = min(batch_start + batch_size * stride, total_frames)
+            indices = list(range(batch_start, batch_end, stride))
+            actual_batch_size = len(indices)
+
             try:
-                frame_data = decoder.get_frame_at(frame_idx)
-                frame = frame_data.data
+                batch_data = decoder.get_frames_at(indices=indices)
+                frames = _ensure_nchw_frames(batch_data.data)
             except Exception:
-                # Frame decode failed, use empty hit
-                hits.append({
-                    "enemy_near": False,
-                    "enemy_attacked_near": False,
-                    "loot_near": False,
-                })
-                pbar.update(1)
+                for idx in indices:
+                    hit = {
+                        "enemy_near": False,
+                        "enemy_attacked_near": False,
+                        "loot_near": False,
+                    }
+                    if prev_hit is not None and prev_idx is not None:
+                        span = max(0, idx - prev_idx)
+                        if span:
+                            hits.extend([prev_hit] * span)
+                            pbar.update(span)
+                    prev_idx = idx
+                    prev_hit = hit
                 continue
 
-            # Ensure NCHW format and move to matcher device
-            frame = _ensure_nchw_frames(frame)
-            if frame.device != self.matcher.device:
-                frame = frame.to(self.matcher.device)
+            if frames.device != self.matcher.device:
+                frames = frames.to(self.matcher.device)
 
-            # Convert to grayscale (squeeze batch dim)
-            gray = _rgb_to_gray(frame[0])  # (H, W)
+            # Batch grayscale conversion
+            grays = _rgb_to_gray(frames)
 
-            # Resize if needed
+            # Batch resize if needed
             if self.sprite_scale != 1.0:
-                h, w = gray.shape
+                _, h, w = grays.shape
                 new_h = max(1, int(h * self.sprite_scale))
                 new_w = max(1, int(w * self.sprite_scale))
-                gray = F.interpolate(
-                    gray.unsqueeze(0).unsqueeze(0),
+                grays = F.interpolate(
+                    grays.unsqueeze(1),
                     size=(new_h, new_w),
                     mode="bilinear",
                     align_corners=False,
-                ).squeeze()
+                ).squeeze(1)
 
-            # Find Tux position
-            tux_pos = self.matcher.best_match(gray, tux_templates, sprite_threshold)
+            # Process each frame in batch
+            for i in range(actual_batch_size):
+                gray = grays[i]
+                idx = indices[i]
 
-            # Find enemies, attacked enemies, and loot
-            enemy_positions = self.matcher.all_matches(gray, enemy_templates, sprite_threshold)
-            attacked_positions = self.matcher.all_matches(gray, attacked_enemy_templates, sprite_threshold)
-            loot_positions = self.matcher.all_matches(gray, loot_templates, sprite_threshold)
+                # Precompute frame FFTs once for all templates
+                frame_fft, frame_sq_fft = self.matcher.precompute_frame_fft(gray)
 
-            # Check proximity
-            enemy_near = self._is_near(tux_pos, enemy_positions, proximity)
-            enemy_attacked_near = self._is_near(tux_pos, attacked_positions, proximity)
-            loot_near = self._is_near(tux_pos, loot_positions, proximity)
+                # Find Tux position (early exit - just need to find, not best match)
+                tux_pos = self.matcher.best_match_cached(
+                    gray,
+                    tux_templates,
+                    sprite_threshold,
+                    frame_fft,
+                    frame_sq_fft,
+                    early_exit=0.0,
+                )
 
-            hits.append({
-                "enemy_near": enemy_near,
-                "enemy_attacked_near": enemy_attacked_near,
-                "loot_near": loot_near,
-            })
-            pbar.update(1)
+                # Find enemies, attacked enemies, and loot
+                enemy_positions = self.matcher.all_matches_cached(gray, enemy_templates, sprite_threshold, frame_fft, frame_sq_fft)
+                attacked_positions = self.matcher.all_matches_cached(gray, attacked_enemy_templates, sprite_threshold, frame_fft, frame_sq_fft)
+                loot_positions = self.matcher.all_matches_cached(gray, loot_templates, sprite_threshold, frame_fft, frame_sq_fft)
+
+                # Check proximity
+                enemy_near = self._is_near(tux_pos, enemy_positions, proximity)
+                enemy_attacked_near = self._is_near(tux_pos, attacked_positions, proximity)
+                loot_near = self._is_near(tux_pos, loot_positions, proximity)
+
+                hit = {
+                    "enemy_near": enemy_near,
+                    "enemy_attacked_near": enemy_attacked_near,
+                    "loot_near": loot_near,
+                }
+                if prev_hit is not None and prev_idx is not None:
+                    span = max(0, idx - prev_idx)
+                    if span:
+                        hits.extend([prev_hit] * span)
+                        pbar.update(span)
+                prev_idx = idx
+                prev_hit = hit
+
+        if prev_hit is not None and prev_idx is not None:
+            span = max(0, total_frames - prev_idx)
+            if span:
+                hits.extend([prev_hit] * span)
+                pbar.update(span)
 
         pbar.close()
         return hits
@@ -388,6 +588,7 @@ class GPUVideoScanner:
         attack_threshold: float,
         sparkle_threshold: float,
         win_proximity_px: float,
+        frame_stride: int = 1,
         show_progress: bool = True,
     ) -> list[dict]:
         """Detect death, attack, and win events in video.
@@ -399,52 +600,90 @@ class GPUVideoScanner:
         total_frames = self._get_frame_count(decoder)
         proximity = win_proximity_px * self.sprite_scale
 
-        results = []
+        results: list[dict] = []
+        stride = max(1, frame_stride)
         pbar = tqdm(total=total_frames, desc="Detecting", unit="f", disable=not show_progress)
 
-        for frame_idx in range(total_frames):
+        # Process in batches
+        batch_size = self.batch_size
+        prev_idx = None
+        prev_result = None
+        for batch_start in range(0, total_frames, batch_size * stride):
+            batch_end = min(batch_start + batch_size * stride, total_frames)
+            indices = list(range(batch_start, batch_end, stride))
+            actual_batch_size = len(indices)
+
             try:
-                frame_data = decoder.get_frame_at(frame_idx)
-                frame = frame_data.data
+                batch_data = decoder.get_frames_at(indices=indices)
+                frames = _ensure_nchw_frames(batch_data.data)
             except Exception:
-                results.append({"death_conf": 0.0, "attack_conf": 0.0, "win_conf": 0.0})
-                pbar.update(1)
+                # Batch decode failed, fall back to per-frame
+                for idx in indices:
+                    result = {"death_conf": 0.0, "attack_conf": 0.0, "win_conf": 0.0}
+                    if prev_result is not None and prev_idx is not None:
+                        span = max(0, idx - prev_idx)
+                        if span:
+                            results.extend([prev_result] * span)
+                            pbar.update(span)
+                    prev_idx = idx
+                    prev_result = result
                 continue
 
-            frame = _ensure_nchw_frames(frame)
-            if frame.device != self.matcher.device:
-                frame = frame.to(self.matcher.device)
+            if frames.device != self.matcher.device:
+                frames = frames.to(self.matcher.device)
 
-            gray = _rgb_to_gray(frame[0])
+            # Batch grayscale conversion: (N, C, H, W) -> (N, H, W)
+            grays = _rgb_to_gray(frames)
 
+            # Batch resize if needed
             if self.sprite_scale != 1.0:
-                h, w = gray.shape
+                _, h, w = grays.shape
                 new_h = max(1, int(h * self.sprite_scale))
                 new_w = max(1, int(w * self.sprite_scale))
-                gray = F.interpolate(
-                    gray.unsqueeze(0).unsqueeze(0),
+                grays = F.interpolate(
+                    grays.unsqueeze(1),  # (N, 1, H, W)
                     size=(new_h, new_w),
                     mode="bilinear",
                     align_corners=False,
-                ).squeeze()
+                ).squeeze(1)  # (N, new_h, new_w)
 
-            # Check death (tux gameover sprite)
-            death_conf = self._max_template_conf(gray, death_templates, death_threshold)
+            # Process each frame in batch
+            for i in range(actual_batch_size):
+                gray = grays[i]
+                idx = indices[i]
 
-            # Check attack (squashed/killed enemy sprites)
-            attack_conf = self._max_template_conf(gray, attacked_templates, attack_threshold)
+                # Precompute frame FFTs once for all templates
+                frame_fft, frame_sq_fft = self.matcher.precompute_frame_fft(gray)
 
-            # Check win (tux near sparkle)
-            win_conf = self._check_win(
-                gray, tux_templates, sparkle_templates, sparkle_threshold, proximity
-            )
+                # Check death (tux gameover sprite)
+                death_conf = self._max_template_conf(gray, death_templates, death_threshold, frame_fft, frame_sq_fft)
 
-            results.append({
-                "death_conf": death_conf,
-                "attack_conf": attack_conf,
-                "win_conf": win_conf,
-            })
-            pbar.update(1)
+                # Check attack (squashed/killed enemy sprites)
+                attack_conf = self._max_template_conf(gray, attacked_templates, attack_threshold, frame_fft, frame_sq_fft)
+
+                # Check win (tux near sparkle)
+                win_conf = self._check_win(
+                    gray, tux_templates, sparkle_templates, sparkle_threshold, proximity, frame_fft, frame_sq_fft
+                )
+
+                result = {
+                    "death_conf": death_conf,
+                    "attack_conf": attack_conf,
+                    "win_conf": win_conf,
+                }
+                if prev_result is not None and prev_idx is not None:
+                    span = max(0, idx - prev_idx)
+                    if span:
+                        results.extend([prev_result] * span)
+                        pbar.update(span)
+                prev_idx = idx
+                prev_result = result
+
+        if prev_result is not None and prev_idx is not None:
+            span = max(0, total_frames - prev_idx)
+            if span:
+                results.extend([prev_result] * span)
+                pbar.update(span)
 
         pbar.close()
         return results
@@ -454,13 +693,15 @@ class GPUVideoScanner:
         gray: torch.Tensor,
         templates: list[tuple[torch.Tensor, str]],
         threshold: float,
+        frame_fft: torch.Tensor,
+        frame_sq_fft: torch.Tensor,
     ) -> float:
-        """Get max template match confidence above threshold."""
+        """Get max template match confidence using cached FFTs."""
         best_conf = 0.0
         for tmpl, _ in templates:
             if tmpl.shape[0] > gray.shape[0] or tmpl.shape[1] > gray.shape[1]:
                 continue
-            ncc = self.matcher.match_template_ncc(gray, tmpl)
+            ncc = self.matcher.match_template_ncc_cached(gray, tmpl, frame_fft, frame_sq_fft)
             if ncc.numel() > 0:
                 conf = ncc.max().item()
                 if conf >= threshold:
@@ -474,13 +715,23 @@ class GPUVideoScanner:
         sparkle_templates: list[tuple[torch.Tensor, str]],
         threshold: float,
         proximity: float,
+        frame_fft: torch.Tensor,
+        frame_sq_fft: torch.Tensor,
     ) -> float:
-        """Check win condition (tux near sparkle)."""
-        tux_pos = self.matcher.best_match(gray, tux_templates, threshold)
+        """Check win condition using cached FFTs."""
+        # Early exit at 0.9 - we just need to find Tux, not the best match
+        tux_pos = self.matcher.best_match_cached(
+            gray,
+            tux_templates,
+            threshold,
+            frame_fft,
+            frame_sq_fft,
+            early_exit=0.0,
+        )
         if tux_pos is None:
             return 0.0
 
-        sparkle_positions = self.matcher.all_matches(gray, sparkle_templates, threshold)
+        sparkle_positions = self.matcher.all_matches_cached(gray, sparkle_templates, threshold, frame_fft, frame_sq_fft)
         if not sparkle_positions:
             return 0.0
 

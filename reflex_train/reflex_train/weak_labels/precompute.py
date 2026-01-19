@@ -79,6 +79,7 @@ def precompute(cfg: LabelingConfig):
             sprite_scale=cfg.sprite_scale,
             sprite_threshold=cfg.sprite_threshold,
             proximity_px=cfg.sprite_proximity,
+            frame_stride=cfg.intent_stride,
         )
     elif cfg.labeler == "keys":
         labeler = KeyWindowIntentLabeler(intent_horizon=cfg.intent_horizon)
@@ -95,6 +96,7 @@ def precompute(cfg: LabelingConfig):
             win_proximity_px=cfg.win_proximity_px,
             sparkle_threshold=cfg.sparkle_threshold,
             win_min_frames=cfg.win_min_frames,
+            frame_stride=cfg.event_stride,
             win_llm_gate=cfg.win_llm_gate,
             win_llm_sample_stride=cfg.win_llm_sample_stride,
             win_llm_prompt=cfg.win_llm_prompt,

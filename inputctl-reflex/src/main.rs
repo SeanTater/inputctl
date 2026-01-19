@@ -259,6 +259,7 @@ impl ActionState {
 struct ActionDelta {
     pressed: Vec<usize>,
     released: Vec<usize>,
+    #[allow(dead_code)]
     active: Vec<bool>,
 }
 

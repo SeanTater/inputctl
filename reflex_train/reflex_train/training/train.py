@@ -102,9 +102,8 @@ def train(cfg):
         batch_size=cfg.batch_size,
     )
     val_loader = DataLoader(
-        val_dataset,
+        StreamingDataset(val_dataset, seed=cfg.seed + 1),
         batch_size=cfg.batch_size,
-        shuffle=False,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -151,6 +150,8 @@ def train(cfg):
         )
 
         for batch_idx, batch in enumerate(progress):
+            if cfg.max_steps_per_epoch and batch_idx >= cfg.max_steps_per_epoch:
+                break
             step_start = time.time()
             pixels = batch["pixels"].to(device, non_blocking=True)
             goals = batch["goal"].to(device, non_blocking=True)
@@ -255,7 +256,9 @@ def validate(model, loader, device, crit_k, crit_m, crit_i, crit_inv, cfg):
     model.eval()
     metrics = RunningMetrics()
     with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader):
+            if cfg.max_steps_per_epoch and batch_idx >= cfg.max_steps_per_epoch:
+                break
             pixels = batch["pixels"].to(device, non_blocking=True)
             goals = batch["goal"].to(device, non_blocking=True)
             target_keys = batch["label_keys"].to(device, non_blocking=True)

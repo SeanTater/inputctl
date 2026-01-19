@@ -13,5 +13,8 @@ label-all DATASET_DIR=DATASET_DIR:
 train CONFIG=CONFIG_FILE:
   uv run --project reflex_train python reflex_train/train_reflex.py {{CONFIG}}
 
+train-mini:
+  uv run --project reflex_train python reflex_train/train_reflex.py reflex_train/configs/mini.toml
+
 export CKPT OUT="reflex.onnx":
   uv run --project reflex_train python reflex_train/export_model.py --checkpoint {{CKPT}} --output {{OUT}}

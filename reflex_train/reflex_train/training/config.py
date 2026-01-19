@@ -16,6 +16,7 @@ class TrainConfig(BaseSettings):
     learning_rate: float = 0.01
     momentum: float = 0.9
     val_split: float = 0.1
+    max_steps_per_epoch: int | None = None  # Limit steps per epoch (None = full dataset)
     context_frames: int = 3
     action_horizon: int = 2
     goal_intent: str = "INFER"

@@ -314,21 +314,6 @@ class MultiStreamDataset(Dataset):
             except Exception:
                 return None, None
 
-    def clear_decoders(self):
-        """Clear decoder cache. Call before forking workers."""
-        if hasattr(self, "_decoders"):
-            self._decoders.clear()
-        self._clear_frame_cache()
-
-    def clear_session_cache(self):
-        """Clear all lazily-loaded session data. Call before spawning workers."""
-        for s in self.sessions:
-            s._key_state_by_frame = None
-            s._intent_by_frame = None
-            s._returns_map = None
-            s._episode_lookup = None
-            s._episode_end_frames = None
-
     def _clear_frame_cache(self):
         """Clear the frame chunk cache."""
         self._frame_cache.clear()
@@ -474,10 +459,7 @@ class MultiStreamDataset(Dataset):
 
 
 class StreamingDataset(IterableDataset):
-    """IterableDataset that groups samples by video for better decode locality.
-
-    Properly shards data across DataLoader workers to avoid duplicate iteration.
-    """
+    """IterableDataset that groups samples by video for chunk cache locality."""
 
     def __init__(self, subset, seed: int):
         self.subset = subset
@@ -496,16 +478,6 @@ class StreamingDataset(IterableDataset):
 
         video_paths = list(grouped.keys())
         rng.shuffle(video_paths)
-
-        # Shard across workers to avoid each worker iterating the full dataset
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            # Split videos across workers (not frames, to preserve locality)
-            video_paths = [
-                v
-                for i, v in enumerate(video_paths)
-                if i % worker_info.num_workers == worker_info.id
-            ]
 
         for video_path in video_paths:
             frames = sorted(grouped[video_path])

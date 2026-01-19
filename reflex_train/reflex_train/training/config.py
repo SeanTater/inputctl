@@ -15,7 +15,6 @@ class TrainConfig(BaseSettings):
     batch_size: int = 32
     learning_rate: float = 1e-4
     val_split: float = 0.1
-    workers: int = 0
     context_frames: int = 3
     action_horizon: int = 2
     goal_intent: str = "INFER"

@@ -97,29 +97,14 @@ def train(cfg):
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    # With chunk caching, frames are already on GPU so pin_memory not helpful
-    # Clear decoders and cached tensors before workers spawn
-    dataset.clear_decoders()
-    dataset.clear_session_cache()
-
-    # Build loader kwargs
-    loader_kwargs = {
-        "batch_size": cfg.batch_size,
-        "num_workers": cfg.workers,
-        "pin_memory": False,
-    }
-    # Use spawn to avoid CUDA context issues if using workers
-    if cfg.workers > 0:
-        loader_kwargs["multiprocessing_context"] = "spawn"
-
     train_loader = DataLoader(
         StreamingDataset(train_dataset, seed=cfg.seed),
-        **loader_kwargs,
+        batch_size=cfg.batch_size,
     )
     val_loader = DataLoader(
         val_dataset,
+        batch_size=cfg.batch_size,
         shuffle=False,
-        **loader_kwargs,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

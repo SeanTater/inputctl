@@ -16,5 +16,12 @@ train CONFIG=CONFIG_FILE:
 train-mini:
   uv run --project reflex_train python reflex_train/train_reflex.py reflex_train/configs/mini.toml
 
+train-remote DATASET_DIR=DATASET_DIR:
+  ssh sean-gallagher@intuition.local -- uv run --directory /home/sean-gallagher/sandbox/inputctl/ --project reflex_train python reflex_train/train_reflex.py {{CONFIG}}
+
+train-remote-mini DATASET_DIR=DATASET_DIR:
+  ssh sean-gallagher@intuition.local -- uv run --directory /home/sean-gallagher/sandbox/inputctl/ --project reflex_train python reflex_train/train_reflex.py reflex_train/configs/mini.toml
+
+  
 export CKPT OUT="reflex.onnx":
   uv run --project reflex_train python reflex_train/export_model.py --checkpoint {{CKPT}} --output {{OUT}}

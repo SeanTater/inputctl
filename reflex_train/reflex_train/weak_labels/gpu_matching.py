@@ -268,14 +268,41 @@ class GPUTemplateMatcher:
             return torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
 
         maps: list[torch.Tensor] = []
+        max_h = 0
+        max_w = 0
         for batch in batches.batches:
-            maps.append(self.match_batch(frame, batch))
+            max_h = max(max_h, batch.max_h)
+            max_w = max(max_w, batch.max_w)
+
+        H, W = frame.shape
+        out_h = max(0, H - max_h + 1)
+        out_w = max(0, W - max_w + 1)
+
+        for batch in batches.batches:
+            ncc = self.match_batch(frame, batch)
+            if ncc.numel() == 0:
+                continue
+            if ncc.shape[1] != out_h or ncc.shape[2] != out_w:
+                ncc = ncc[:, :out_h, :out_w]
+            maps.append(ncc)
+
         if not maps:
             return torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
+
         dims = {m.dim() for m in maps}
         if dims != {3}:
             shapes = [tuple(m.shape) for m in maps]
             raise RuntimeError(f"match_batches expects 3D NCC maps; got shapes={shapes}")
+
+        heights = {m.shape[1] for m in maps}
+        widths = {m.shape[2] for m in maps}
+        if len(heights) != 1 or len(widths) != 1:
+            shapes = [tuple(m.shape) for m in maps]
+            raise RuntimeError(
+                "match_batches expects same spatial size across batches after crop; "
+                f"got shapes={shapes}"
+            )
+
         return torch.cat(maps, dim=0)
 
 

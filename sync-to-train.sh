@@ -1,6 +1,36 @@
 #!/bin/bash
 
-# Sync datasets and checkpoints both ways
+# Sync datasets with ownership rules:
+# - Local owns raw capture files (video/frames/inputs)
+# - GPU owns generated labels (intent/events/episodes/returns)
 
-rsync -av ~/sandbox/inputctl/dataset/ sean-gallagher@intuition.local:/home/sean-gallagher/sandbox/inputctl/dataset/
-rsync -av sean-gallagher@intuition.local:/home/sean-gallagher/sandbox/inputctl/dataset/ ~/sandbox/inputctl/dataset/
+LOCAL_DATASET="$HOME/repos/inputctl/dataset/"
+REMOTE_DATASET="sean-gallagher@intuition.local:/home/sean-gallagher/sandbox/inputctl/dataset/"
+
+set -euo pipefail
+
+# Push raw captures to GPU (exclude labels to avoid clobbering)
+rsync -av --delete \
+  --include '*/' \
+  --include 'recording.mp4' \
+  --include 'frames.parquet' \
+  --include 'inputs.parquet' \
+  --include 'frames.jsonl' \
+  --include 'inputs.jsonl' \
+  --include 'mouse.bin' \
+  --exclude 'intent.parquet' \
+  --exclude 'events.parquet' \
+  --exclude 'episodes.parquet' \
+  --exclude 'returns.parquet' \
+  --exclude '*' \
+  "$LOCAL_DATASET" "$REMOTE_DATASET"
+
+# Pull labels from GPU (only labeled outputs)
+rsync -av --delete \
+  --include '*/' \
+  --include 'intent.parquet' \
+  --include 'events.parquet' \
+  --include 'episodes.parquet' \
+  --include 'returns.parquet' \
+  --exclude '*' \
+  "$REMOTE_DATASET" "$LOCAL_DATASET"

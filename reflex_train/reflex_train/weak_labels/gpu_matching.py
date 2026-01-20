@@ -239,7 +239,10 @@ class GPUTemplateMatcher:
         local_std = (local_var * local_mask_sum).sqrt()
 
         ncc = (correlation - local_mean * batch.t_sum) / (local_std * batch.t_std)
-        return ncc.squeeze(0).clamp(-1.0, 1.0)
+        ncc = ncc.squeeze(0)
+        if ncc.dim() == 2:
+            ncc = ncc.unsqueeze(0)
+        return ncc.clamp(-1.0, 1.0)
 
     def match_batches(self, frame: torch.Tensor, batches: TemplateBatches) -> torch.Tensor:
         """Match multiple template batches and concat results."""
@@ -249,7 +252,9 @@ class GPUTemplateMatcher:
         maps: list[torch.Tensor] = []
         for batch in batches.batches:
             maps.append(self.match_batch(frame, batch))
-        return torch.cat(maps, dim=0) if maps else torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
+        if not maps:
+            return torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
+        return torch.cat(maps, dim=0)
 
 
 

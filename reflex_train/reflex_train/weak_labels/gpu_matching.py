@@ -76,13 +76,19 @@ class GPUTemplateMatcher:
         if cache_key in self._template_cache:
             return self._template_cache[cache_key]
 
-        img = Image.open(path).convert("L")  # Grayscale
+        img = Image.open(path).convert("RGBA")
+        alpha = img.getchannel("A")
+        gray = img.convert("RGB").convert("L")
         if scale != 1.0:
-            new_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
+            new_size = (max(1, int(gray.width * scale)), max(1, int(gray.height * scale)))
+            gray = gray.resize(new_size, Image.Resampling.LANCZOS)
+            alpha = alpha.resize(new_size, Image.Resampling.LANCZOS)
 
-        tensor = torch.tensor(list(img.getdata()), dtype=self.dtype, device=self.device)
-        tensor = tensor.reshape(img.height, img.width)
+        gray_tensor = torch.tensor(list(gray.getdata()), dtype=self.dtype, device=self.device)
+        alpha_tensor = torch.tensor(list(alpha.getdata()), dtype=self.dtype, device=self.device)
+        gray_tensor = gray_tensor.reshape(gray.height, gray.width)
+        alpha_tensor = alpha_tensor.reshape(gray.height, gray.width) / 255.0
+        tensor = gray_tensor * alpha_tensor
         self._template_cache[cache_key] = tensor
         return tensor
 
@@ -415,10 +421,14 @@ class GPUVideoScanner:
         matcher: GPUTemplateMatcher | None = None,
         batch_size: int = 16,
         sprite_scale: float = 0.5,
+        blank_frame_mean_threshold: float | None = None,
+        blank_frame_std_threshold: float | None = None,
     ):
         self.matcher = matcher or GPUTemplateMatcher()
         self.batch_size = batch_size
         self.sprite_scale = sprite_scale
+        self.blank_frame_mean_threshold = blank_frame_mean_threshold
+        self.blank_frame_std_threshold = blank_frame_std_threshold
         self._decoder_cache: dict[str, VideoDecoder] = {}
 
     def _get_video_decoder(self, path: str) -> VideoDecoder:
@@ -531,6 +541,21 @@ class GPUVideoScanner:
             for i in range(actual_batch_size):
                 gray = grays[i]
                 idx = indices[i]
+
+                if self._is_blank_frame(gray):
+                    hit = {
+                        "enemy_near": False,
+                        "enemy_attacked_near": False,
+                        "loot_near": False,
+                    }
+                    if prev_hit is not None and prev_idx is not None:
+                        span = max(0, idx - prev_idx)
+                        if span:
+                            hits.extend([prev_hit] * span)
+                            pbar.update(span)
+                    prev_idx = idx
+                    prev_hit = hit
+                    continue
 
                 # Precompute frame FFTs once for all templates
                 frame_fft, frame_sq_fft = self.matcher.precompute_frame_fft(gray)
@@ -652,6 +677,17 @@ class GPUVideoScanner:
                 gray = grays[i]
                 idx = indices[i]
 
+                if self._is_blank_frame(gray):
+                    result = {"death_conf": 0.0, "attack_conf": 0.0, "win_conf": 0.0}
+                    if prev_result is not None and prev_idx is not None:
+                        span = max(0, idx - prev_idx)
+                        if span:
+                            results.extend([prev_result] * span)
+                            pbar.update(span)
+                    prev_idx = idx
+                    prev_result = result
+                    continue
+
                 # Precompute frame FFTs once for all templates
                 frame_fft, frame_sq_fft = self.matcher.precompute_frame_fft(gray)
 
@@ -758,3 +794,12 @@ class GPUVideoScanner:
     def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
         """Euclidean distance between two points."""
         return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+    def _is_blank_frame(self, gray: torch.Tensor) -> bool:
+        if self.blank_frame_mean_threshold is None and self.blank_frame_std_threshold is None:
+            return False
+        mean_val = gray.mean().item()
+        std_val = gray.std().item()
+        mean_ok = self.blank_frame_mean_threshold is None or mean_val <= self.blank_frame_mean_threshold
+        std_ok = self.blank_frame_std_threshold is None or std_val <= self.blank_frame_std_threshold
+        return mean_ok and std_ok

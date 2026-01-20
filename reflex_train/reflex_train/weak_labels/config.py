@@ -20,6 +20,7 @@ class LabelingConfig(BaseSettings):
     sparkle_threshold: float = 0.9
     win_min_frames: int = 3
     event_stride: int = 1
+    attack_threshold: float = 0.8
     win_llm_gate: bool = False
     win_llm_sample_stride: int = 30
     win_llm_prompt: str = (
@@ -29,6 +30,11 @@ class LabelingConfig(BaseSettings):
     win_llm_model: str = "qwen3-vl:4b"
     win_llm_url: str = "http://localhost:11434/api/generate"
     respawn_gap: int = 30
+    blank_frame_mean_threshold: float = 5.0
+    blank_frame_std_threshold: float = 3.0
+    attack_min_gap: int = 5
+    death_min_gap: int = 30
+    win_min_gap: int = 30
 
     # Rewards
     gamma: float = 0.99

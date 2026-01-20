@@ -50,6 +50,11 @@ class EventDetector:
         sparkle_threshold: float = 0.8,
         win_min_frames: int = 3,
         frame_stride: int = 1,
+        blank_frame_mean_threshold: float | None = None,
+        blank_frame_std_threshold: float | None = None,
+        attack_min_gap: int = 5,
+        death_min_gap: int = 30,
+        win_min_gap: int = 30,
         win_llm_gate: bool = False,
         win_llm_sample_stride: int = 30,
         win_llm_prompt: str = (
@@ -67,6 +72,9 @@ class EventDetector:
         self.sparkle_threshold = sparkle_threshold
         self.win_min_frames = win_min_frames
         self.frame_stride = frame_stride
+        self.attack_min_gap = attack_min_gap
+        self.death_min_gap = death_min_gap
+        self.win_min_gap = win_min_gap
         self.win_llm_gate = win_llm_gate
         self.win_llm_sample_stride = max(1, win_llm_sample_stride)
         self.win_llm_prompt = win_llm_prompt
@@ -79,6 +87,8 @@ class EventDetector:
         self._scanner = GPUVideoScanner(
             matcher=self._matcher,
             sprite_scale=sprite_scale,
+            blank_frame_mean_threshold=blank_frame_mean_threshold,
+            blank_frame_std_threshold=blank_frame_std_threshold,
         )
 
         # Load templates
@@ -331,9 +341,7 @@ class EventDetector:
         except Exception:
             return False
 
-    def _deduplicate_events(
-        self, events: list[Event], min_gap: int = 30
-    ) -> list[Event]:
+    def _deduplicate_events(self, events: list[Event]) -> list[Event]:
         """Remove duplicate events that are too close together."""
         if not events:
             return events
@@ -341,6 +349,12 @@ class EventDetector:
         deduped = [events[0]]
         for event in events[1:]:
             prev = deduped[-1]
+            if event.event == "ATTACK":
+                min_gap = self.attack_min_gap
+            elif event.event == "WIN":
+                min_gap = self.win_min_gap
+            else:
+                min_gap = self.death_min_gap
             if (
                 event.event == prev.event
                 and (event.frame_idx - prev.frame_idx) < min_gap

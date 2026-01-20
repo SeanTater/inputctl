@@ -65,6 +65,7 @@ def precompute(cfg: LabelingConfig):
             base_dir=cfg.base_dir,
             sprite_scale=cfg.sprite_scale,
             death_threshold=cfg.death_threshold,
+            attack_threshold=cfg.attack_threshold,
             win_proximity_px=cfg.win_proximity_px,
             sparkle_threshold=cfg.sparkle_threshold,
             win_min_frames=cfg.win_min_frames,
@@ -75,6 +76,11 @@ def precompute(cfg: LabelingConfig):
             win_llm_timeout_s=cfg.win_llm_timeout_s,
             win_llm_model=cfg.win_llm_model,
             win_llm_url=cfg.win_llm_url,
+            blank_frame_mean_threshold=cfg.blank_frame_mean_threshold,
+            blank_frame_std_threshold=cfg.blank_frame_std_threshold,
+            attack_min_gap=cfg.attack_min_gap,
+            death_min_gap=cfg.death_min_gap,
+            win_min_gap=cfg.win_min_gap,
         )
 
     for i, run_dir in enumerate(run_dirs):

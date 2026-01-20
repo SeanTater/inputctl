@@ -66,8 +66,8 @@ class EventDetector:
         sparkle_threshold: float = 0.8,
         win_min_frames: int = 3,
         frame_stride: int = 1,
-        blank_frame_mean_threshold: float | None = None,
-        blank_frame_std_threshold: float | None = None,
+        blank_frame_mean_threshold: float | None = 40.0,
+        blank_frame_std_threshold: float | None = 10.0,
         attack_min_gap: int = 1,  # one per frame
         death_min_gap: int = 30 * 5,  # five seconds
         win_min_gap: int = 30 * 60,  # one minute

@@ -231,6 +231,13 @@ class MultiStreamDataset(Dataset):
         self._cached_video_path: str | None = None
         self._cached_chunk_start: int = -1
         self._cached_chunk_end: int = -1
+        # Async prefetch cache (CUDA only)
+        self._prefetch_cache: dict[int, torch.Tensor] = {}
+        self._prefetch_video_path: str | None = None
+        self._prefetch_chunk_start: int = -1
+        self._prefetch_chunk_end: int = -1
+        self._prefetch_stream: torch.cuda.Stream | None = None
+        self._prefetch_event: torch.cuda.Event | None = None
 
         print(f"Indexing {len(run_dirs)} sessions...")
         for d in run_dirs:
@@ -318,6 +325,11 @@ class MultiStreamDataset(Dataset):
         self._cached_video_path = None
         self._cached_chunk_start = -1
         self._cached_chunk_end = -1
+        self._prefetch_cache.clear()
+        self._prefetch_video_path = None
+        self._prefetch_chunk_start = -1
+        self._prefetch_chunk_end = -1
+        self._prefetch_event = None
 
     def _decode_and_cache_chunk(self, video_path: str, start_idx: int, end_idx: int):
         """Batch-decode a chunk of frames and cache transformed results on GPU.
@@ -327,38 +339,90 @@ class MultiStreamDataset(Dataset):
             start_idx: Starting frame index (inclusive)
             end_idx: Ending frame index (exclusive)
         """
+        frames_transformed = self._decode_and_transform(video_path, start_idx, end_idx)
+        if frames_transformed is None:
+            return
+
+        indices = list(range(start_idx, end_idx))
+        for i, frame_idx in enumerate(indices):
+            if i < frames_transformed.shape[0]:
+                self._frame_cache[frame_idx] = frames_transformed[i]
+
+        self._cached_video_path = video_path
+        self._cached_chunk_start = start_idx
+        self._cached_chunk_end = end_idx
+
+    def _decode_and_transform(
+        self, video_path: str, start_idx: int, end_idx: int
+    ) -> torch.Tensor | None:
         decoder = self._get_video_decoder(video_path)
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Batch decode all frames in chunk
         indices = list(range(start_idx, end_idx))
         try:
             frame_batch = decoder.get_frames_at(indices=indices)
             frames = frame_batch.data
         except Exception as e:
             print(f"Failed to decode chunk {start_idx}-{end_idx}: {e}")
-            return
+            return None
 
         if frames is None or frames.numel() == 0:
-            return
+            return None
 
         frames = _ensure_nchw_frames(frames)
 
-        # Batch transform on GPU (already fast: 0.2ms per 4 frames)
         if self.transform:
-            frames_transformed = batched_gpu_transform(frames.to(device), size=224)
-        else:
-            frames_transformed = frames.to(device).float() / 255.0
+            return batched_gpu_transform(frames.to(device), size=224)
+        return frames.to(device).float() / 255.0
 
-        # Cache individual frames
-        for i, frame_idx in enumerate(indices):
-            if i < frames_transformed.shape[0]:
-                self._frame_cache[frame_idx] = frames_transformed[i]
+    def _maybe_swap_prefetch(self, video_path: str):
+        if (
+            self._prefetch_video_path == video_path
+            and self._prefetch_chunk_start >= 0
+            and self._prefetch_chunk_end > self._prefetch_chunk_start
+            and self._prefetch_cache
+        ):
+            if self._prefetch_event is not None:
+                torch.cuda.current_stream().wait_event(self._prefetch_event)
+            self._frame_cache = self._prefetch_cache
+            self._cached_video_path = self._prefetch_video_path
+            self._cached_chunk_start = self._prefetch_chunk_start
+            self._cached_chunk_end = self._prefetch_chunk_end
+            self._prefetch_cache = {}
+            self._prefetch_video_path = None
+            self._prefetch_chunk_start = -1
+            self._prefetch_chunk_end = -1
+            self._prefetch_event = None
 
-        # Update cache metadata
-        self._cached_video_path = video_path
-        self._cached_chunk_start = start_idx
-        self._cached_chunk_end = end_idx
+    def _prefetch_next_chunk(self, video_path: str, start_idx: int, end_idx: int):
+        if not torch.cuda.is_available():
+            return
+        if self._prefetch_stream is None:
+            self._prefetch_stream = torch.cuda.Stream()
+        if (
+            self._prefetch_video_path == video_path
+            and self._prefetch_chunk_start == start_idx
+            and self._prefetch_chunk_end == end_idx
+        ):
+            return
+
+        with torch.cuda.stream(self._prefetch_stream):
+            frames_transformed = self._decode_and_transform(
+                video_path, start_idx, end_idx
+            )
+            if frames_transformed is None:
+                return
+            self._prefetch_cache = {}
+            indices = list(range(start_idx, end_idx))
+            for i, frame_idx in enumerate(indices):
+                if i < frames_transformed.shape[0]:
+                    self._prefetch_cache[frame_idx] = frames_transformed[i]
+            self._prefetch_video_path = video_path
+            self._prefetch_chunk_start = start_idx
+            self._prefetch_chunk_end = end_idx
+            if self._prefetch_event is None:
+                self._prefetch_event = torch.cuda.Event()
+            self._prefetch_event.record(self._prefetch_stream)
 
     def __getitem__(self, idx):
         session_idx, frame_i, target_i, frame_idx = self.samples[idx]
@@ -379,11 +443,11 @@ class MultiStreamDataset(Dataset):
 
         # Check if we need to decode a new chunk
         all_indices = context_indices + [next_idx]
-        needs_decode = any(
-            idx not in self._frame_cache
-            for idx in all_indices
-        )
+        needs_decode = any(idx not in self._frame_cache for idx in all_indices)
 
+        if needs_decode:
+            self._maybe_swap_prefetch(vpath)
+            needs_decode = any(idx not in self._frame_cache for idx in all_indices)
         if needs_decode:
             # Clear old frames before decoding new chunk (prevent memory leak)
             self._frame_cache.clear()
@@ -391,6 +455,10 @@ class MultiStreamDataset(Dataset):
             chunk_start = min(all_indices)
             chunk_end = min(chunk_start + self.chunk_size, max(session.frame_indices) + 1)
             self._decode_and_cache_chunk(vpath, chunk_start, chunk_end)
+            next_start = chunk_end
+            next_end = min(next_start + self.chunk_size, max(session.frame_indices) + 1)
+            if next_start < next_end:
+                self._prefetch_next_chunk(vpath, next_start, next_end)
 
         # Retrieve frames from cache (or create fallback if cache failed)
         frames = []

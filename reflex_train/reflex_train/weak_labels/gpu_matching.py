@@ -54,6 +54,13 @@ class TemplateBatch:
     max_w: int
 
 
+@dataclass
+class TemplateBatches:
+    batches: list[TemplateBatch]
+    sizes: list[tuple[int, int]]
+    paths: list[str]
+
+
 class GPUTemplateMatcher:
     """GPU-accelerated template matching using batched conv2d NCC."""
 
@@ -61,11 +68,13 @@ class GPUTemplateMatcher:
         self,
         device: str | None = None,
         dtype: torch.dtype = torch.float32,
+        max_templates_per_batch: int | None = 16,
     ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         self.dtype = dtype
+        self.max_templates_per_batch = max_templates_per_batch
         self._template_cache: dict[str, torch.Tensor] = {}
         self._template_mask_cache: dict[int, torch.Tensor] = {}
 
@@ -119,7 +128,7 @@ class GPUTemplateMatcher:
                 continue
         return templates
 
-    def build_batch(self, templates: list[tuple[torch.Tensor, str]]) -> TemplateBatch:
+    def _build_batch(self, templates: list[tuple[torch.Tensor, str]]) -> TemplateBatch:
         """Pad templates/masks to common size and precompute NCC stats."""
         if not templates:
             empty = torch.empty(0, 1, 1, 1, device=self.device, dtype=self.dtype)
@@ -175,6 +184,34 @@ class GPUTemplateMatcher:
             max_w=max_w,
         )
 
+    def build_batches(self, templates: list[tuple[torch.Tensor, str]]) -> TemplateBatches:
+        """Build size-grouped template batches with optional chunking."""
+        if not templates:
+            return TemplateBatches(batches=[], sizes=[], paths=[])
+
+        grouped: dict[tuple[int, int], list[tuple[torch.Tensor, str]]] = {}
+        for tmpl, path in templates:
+            grouped.setdefault((tmpl.shape[0], tmpl.shape[1]), []).append((tmpl, path))
+
+        max_per_batch = self.max_templates_per_batch
+        batches: list[TemplateBatch] = []
+        sizes: list[tuple[int, int]] = []
+        paths: list[str] = []
+        for group in grouped.values():
+            if max_per_batch is None or max_per_batch <= 0:
+                chunked = [group]
+            else:
+                chunked = [group[i : i + max_per_batch] for i in range(0, len(group), max_per_batch)]
+            for chunk in chunked:
+                batch = self._build_batch(chunk)
+                if batch.kernels.numel() == 0:
+                    continue
+                batches.append(batch)
+                sizes.extend(batch.sizes)
+                paths.extend(batch.paths)
+
+        return TemplateBatches(batches=batches, sizes=sizes, paths=paths)
+
     def match_batch(self, frame: torch.Tensor, batch: TemplateBatch) -> torch.Tensor:
         """Batch NCC for padded templates.
 
@@ -204,22 +241,32 @@ class GPUTemplateMatcher:
         ncc = (correlation - local_mean * batch.t_sum) / (local_std * batch.t_std)
         return ncc.squeeze(0).clamp(-1.0, 1.0)
 
+    def match_batches(self, frame: torch.Tensor, batches: TemplateBatches) -> torch.Tensor:
+        """Match multiple template batches and concat results."""
+        if not batches.batches:
+            return torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
+
+        maps: list[torch.Tensor] = []
+        for batch in batches.batches:
+            maps.append(self.match_batch(frame, batch))
+        return torch.cat(maps, dim=0) if maps else torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
+
 
 
     def best_match(
         self,
         frame: torch.Tensor,
-        batch: TemplateBatch,
+        batches: TemplateBatches,
         threshold: float,
     ) -> tuple[float, float] | None:
         """Find best matching template location above threshold."""
-        ncc_maps = self.match_batch(frame, batch)
+        ncc_maps = self.match_batches(frame, batches)
         if ncc_maps.numel() == 0:
             return None
 
         best_pos = None
         best_score = threshold
-        for idx, (h, w) in enumerate(batch.sizes):
+        for idx, (h, w) in enumerate(batches.sizes):
             ncc = ncc_maps[idx]
             max_val = ncc.max().item()
             if max_val >= best_score:
@@ -234,16 +281,16 @@ class GPUTemplateMatcher:
     def all_matches(
         self,
         frame: torch.Tensor,
-        batch: TemplateBatch,
+        batches: TemplateBatches,
         threshold: float,
     ) -> list[tuple[float, float]]:
         """Find all template matches above threshold."""
         positions: list[tuple[float, float]] = []
-        ncc_maps = self.match_batch(frame, batch)
+        ncc_maps = self.match_batches(frame, batches)
         if ncc_maps.numel() == 0:
             return positions
 
-        for idx, (h, w) in enumerate(batch.sizes):
+        for idx, (h, w) in enumerate(batches.sizes):
             ncc = ncc_maps[idx]
             max_val = ncc.max().item()
             if max_val >= threshold:
@@ -269,8 +316,11 @@ class GPUVideoScanner:
         sprite_scale: float = 0.5,
         blank_frame_mean_threshold: float | None = None,
         blank_frame_std_threshold: float | None = None,
+        max_templates_per_batch: int | None = 16,
     ):
-        self.matcher = matcher or GPUTemplateMatcher()
+        self.matcher = matcher or GPUTemplateMatcher(
+            max_templates_per_batch=max_templates_per_batch
+        )
         self.batch_size = batch_size
         self.sprite_scale = sprite_scale
         self.blank_frame_mean_threshold = blank_frame_mean_threshold
@@ -351,10 +401,10 @@ class GPUVideoScanner:
         total_frames = self._get_frame_count(decoder)
         proximity = proximity_px * self.sprite_scale
 
-        tux_batch = self.matcher.build_batch(tux_templates)
-        enemy_batch = self.matcher.build_batch(enemy_templates)
-        attacked_batch = self.matcher.build_batch(attacked_enemy_templates)
-        loot_batch = self.matcher.build_batch(loot_templates)
+        tux_batches = self.matcher.build_batches(tux_templates)
+        enemy_batches = self.matcher.build_batches(enemy_templates)
+        attacked_batches = self.matcher.build_batches(attacked_enemy_templates)
+        loot_batches = self.matcher.build_batches(loot_templates)
 
         hits: list[dict] = []
         stride = max(1, frame_stride)
@@ -429,14 +479,14 @@ class GPUVideoScanner:
                 # Find Tux position (early exit - just need to find, not best match)
                 tux_pos = self.matcher.best_match(
                     gray,
-                    tux_batch,
+                    tux_batches,
                     sprite_threshold,
                 )
 
                 # Find enemies, attacked enemies, and loot
-                enemy_positions = self.matcher.all_matches(gray, enemy_batch, sprite_threshold)
-                attacked_positions = self.matcher.all_matches(gray, attacked_batch, sprite_threshold)
-                loot_positions = self.matcher.all_matches(gray, loot_batch, sprite_threshold)
+                enemy_positions = self.matcher.all_matches(gray, enemy_batches, sprite_threshold)
+                attacked_positions = self.matcher.all_matches(gray, attacked_batches, sprite_threshold)
+                loot_positions = self.matcher.all_matches(gray, loot_batches, sprite_threshold)
 
                 # Check proximity
                 enemy_near = self._is_near(tux_pos, enemy_positions, proximity)
@@ -483,8 +533,8 @@ class GPUVideoScanner:
         decoder = self._get_video_decoder(video_path)
         total_frames = self._get_frame_count(decoder)
 
-        death_batch = self.matcher.build_batch(death_templates)
-        attacked_batch = self.matcher.build_batch(attacked_templates)
+        death_batches = self.matcher.build_batches(death_templates)
+        attacked_batches = self.matcher.build_batches(attacked_templates)
 
         results: list[dict] = []
         stride = max(1, frame_stride)
@@ -550,10 +600,10 @@ class GPUVideoScanner:
                     continue
 
                 # Check death (tux gameover sprite)
-                death_conf = self._max_template_conf(gray, death_batch, death_threshold)
+                death_conf = self._max_template_conf(gray, death_batches, death_threshold)
 
                 # Check attack (squashed/killed enemy sprites)
-                attack_conf = self._max_template_conf(gray, attacked_batch, attack_threshold)
+                attack_conf = self._max_template_conf(gray, attacked_batches, attack_threshold)
 
                 result = {
                     "death_conf": death_conf,
@@ -579,11 +629,11 @@ class GPUVideoScanner:
     def _max_template_conf(
         self,
         gray: torch.Tensor,
-        batch: TemplateBatch,
+        batches: TemplateBatches,
         threshold: float,
     ) -> float:
         """Get max template match confidence using conv2d NCC."""
-        ncc_maps = self.matcher.match_batch(gray, batch)
+        ncc_maps = self.matcher.match_batches(gray, batches)
         if ncc_maps.numel() == 0:
             return 0.0
 

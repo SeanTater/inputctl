@@ -83,7 +83,7 @@ class EventDetector:
         self.death_min_gap = death_min_gap
 
         # GPU matching setup
-        self._matcher = GPUTemplateMatcher()
+        self._matcher = GPUTemplateMatcher(max_templates_per_batch=16)
         self._scanner = GPUVideoScanner(
             matcher=self._matcher,
             sprite_scale=sprite_scale,

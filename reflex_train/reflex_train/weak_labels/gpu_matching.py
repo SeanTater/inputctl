@@ -233,6 +233,13 @@ class GPUTemplateMatcher:
         local_sum = F.conv2d(frame_4d, batch.masks)
         local_sum_sq = F.conv2d(frame_4d * frame_4d, batch.masks)
 
+        if correlation.dim() != 4 or local_sum.dim() != 4 or local_sum_sq.dim() != 4:
+            raise RuntimeError(
+                "match_batch expects 4D conv outputs; got "
+                f"corr={tuple(correlation.shape)}, sum={tuple(local_sum.shape)}, "
+                f"sum_sq={tuple(local_sum_sq.shape)}"
+            )
+
         local_mean = local_sum / local_mask_sum
         local_var = local_sum_sq / local_mask_sum - local_mean.pow(2)
         local_var = local_var.clamp(min=1e-7)
@@ -242,6 +249,11 @@ class GPUTemplateMatcher:
         ncc = ncc.squeeze(0)
         if ncc.dim() == 2:
             ncc = ncc.unsqueeze(0)
+        if ncc.dim() != 3:
+            raise RuntimeError(
+                "match_batch expects 3D NCC maps (N,H,W) after squeeze; "
+                f"got {tuple(ncc.shape)}"
+            )
         return ncc.clamp(-1.0, 1.0)
 
     def match_batches(self, frame: torch.Tensor, batches: TemplateBatches) -> torch.Tensor:
@@ -254,6 +266,10 @@ class GPUTemplateMatcher:
             maps.append(self.match_batch(frame, batch))
         if not maps:
             return torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
+        dims = {m.dim() for m in maps}
+        if dims != {3}:
+            shapes = [tuple(m.shape) for m in maps]
+            raise RuntimeError(f"match_batches expects 3D NCC maps; got shapes={shapes}")
         return torch.cat(maps, dim=0)
 
 

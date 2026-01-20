@@ -170,8 +170,14 @@ class GPUTemplateMatcher:
 
         kernel_stack = torch.stack(kernels, dim=0)
         mask_stack = torch.stack(masks, dim=0)
-        t_sum = kernel_stack.sum(dim=(2, 3), keepdim=True)
-        t_std = kernel_stack.pow(2).sum(dim=(2, 3), keepdim=True).sqrt().clamp(min=1e-7)
+        t_sum = kernel_stack.sum(dim=(2, 3), keepdim=True).permute(1, 0, 2, 3)
+        t_std = (
+            kernel_stack.pow(2)
+            .sum(dim=(2, 3), keepdim=True)
+            .sqrt()
+            .clamp(min=1e-7)
+            .permute(1, 0, 2, 3)
+        )
 
         return TemplateBatch(
             kernels=kernel_stack,

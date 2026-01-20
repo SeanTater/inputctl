@@ -68,13 +68,11 @@ class GPUTemplateMatcher:
         self,
         device: str | None = None,
         dtype: torch.dtype = torch.float32,
-        max_templates_per_batch: int | None = 128,
     ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         self.dtype = dtype
-        self.max_templates_per_batch = max_templates_per_batch
         self._template_cache: dict[str, torch.Tensor] = {}
         self._template_mask_cache: dict[int, torch.Tensor] = {}
 
@@ -191,7 +189,7 @@ class GPUTemplateMatcher:
         )
 
     def build_batches(self, templates: list[tuple[torch.Tensor, str]]) -> TemplateBatches:
-        """Build size-grouped template batches with optional chunking."""
+        """Build size-grouped template batches."""
         if not templates:
             return TemplateBatches(batches=[], sizes=[], paths=[])
 
@@ -199,22 +197,16 @@ class GPUTemplateMatcher:
         for tmpl, path in templates:
             grouped.setdefault((tmpl.shape[0], tmpl.shape[1]), []).append((tmpl, path))
 
-        max_per_batch = self.max_templates_per_batch
         batches: list[TemplateBatch] = []
         sizes: list[tuple[int, int]] = []
         paths: list[str] = []
         for group in grouped.values():
-            if max_per_batch is None or max_per_batch <= 0:
-                chunked = [group]
-            else:
-                chunked = [group[i : i + max_per_batch] for i in range(0, len(group), max_per_batch)]
-            for chunk in chunked:
-                batch = self._build_batch(chunk)
-                if batch.kernels.numel() == 0:
-                    continue
-                batches.append(batch)
-                sizes.extend(batch.sizes)
-                paths.extend(batch.paths)
+            batch = self._build_batch(group)
+            if batch.kernels.numel() == 0:
+                continue
+            batches.append(batch)
+            sizes.extend(batch.sizes)
+            paths.extend(batch.paths)
 
         return TemplateBatches(batches=batches, sizes=sizes, paths=paths)
 
@@ -370,13 +362,12 @@ class GPUVideoScanner:
         sprite_scale: float = 0.5,
         blank_frame_mean_threshold: float | None = None,
         blank_frame_std_threshold: float | None = None,
-        max_templates_per_batch: int | None = 128,
+        scale_by_resolution: dict[str, float] | None = None,
     ):
-        self.matcher = matcher or GPUTemplateMatcher(
-            max_templates_per_batch=max_templates_per_batch
-        )
+        self.matcher = matcher or GPUTemplateMatcher()
         self.batch_size = batch_size
         self.sprite_scale = sprite_scale
+        self.scale_by_resolution = scale_by_resolution or {"1920x1080": sprite_scale}
         self.blank_frame_mean_threshold = blank_frame_mean_threshold
         self.blank_frame_std_threshold = blank_frame_std_threshold
         self._decoder_cache: dict[str, VideoDecoder] = {}
@@ -418,6 +409,41 @@ class GPUVideoScanner:
                 return 0
             return int(num_frames)
 
+    def _resolution_key(self, decoder: VideoDecoder) -> str | None:
+        meta = decoder.metadata
+        width = getattr(meta, "width", None)
+        height = getattr(meta, "height", None)
+        if width is None or height is None:
+            return None
+        return f"{width}x{height}"
+
+    def _scale_for_decoder(self, decoder: VideoDecoder) -> float:
+        key = self._resolution_key(decoder)
+        if key is None:
+            return self.sprite_scale
+        return self.scale_by_resolution.get(key, self.sprite_scale)
+
+    def _rescale_templates(
+        self,
+        templates: list[tuple[torch.Tensor, str]],
+        scale: float,
+    ) -> list[tuple[torch.Tensor, str]]:
+        if scale == 1.0:
+            return templates
+        scaled: list[tuple[torch.Tensor, str]] = []
+        for tmpl, path in templates:
+            h, w = tmpl.shape
+            new_h = max(1, int(round(h * scale)))
+            new_w = max(1, int(round(w * scale)))
+            resized = F.interpolate(
+                tmpl.unsqueeze(0).unsqueeze(0),
+                size=(new_h, new_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0).squeeze(0)
+            scaled.append((resized, path))
+        return scaled
+
     def _is_near(
         self,
         origin: tuple[float, float] | None,
@@ -453,7 +479,15 @@ class GPUVideoScanner:
         """
         decoder = self._get_video_decoder(video_path)
         total_frames = self._get_frame_count(decoder)
-        proximity = proximity_px * self.sprite_scale
+        scale = self._scale_for_decoder(decoder)
+        proximity = proximity_px * scale
+
+        if scale != self.sprite_scale:
+            scale_ratio = scale / self.sprite_scale
+            tux_templates = self._rescale_templates(tux_templates, scale_ratio)
+            enemy_templates = self._rescale_templates(enemy_templates, scale_ratio)
+            attacked_enemy_templates = self._rescale_templates(attacked_enemy_templates, scale_ratio)
+            loot_templates = self._rescale_templates(loot_templates, scale_ratio)
 
         tux_batches = self.matcher.build_batches(tux_templates)
         enemy_batches = self.matcher.build_batches(enemy_templates)
@@ -586,6 +620,12 @@ class GPUVideoScanner:
         """
         decoder = self._get_video_decoder(video_path)
         total_frames = self._get_frame_count(decoder)
+        scale = self._scale_for_decoder(decoder)
+
+        if scale != self.sprite_scale:
+            scale_ratio = scale / self.sprite_scale
+            death_templates = self._rescale_templates(death_templates, scale_ratio)
+            attacked_templates = self._rescale_templates(attacked_templates, scale_ratio)
 
         death_batches = self.matcher.build_batches(death_templates)
         attacked_batches = self.matcher.build_batches(attacked_templates)

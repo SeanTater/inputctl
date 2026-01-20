@@ -21,7 +21,7 @@ class LabelingConfig(BaseSettings):
     detect_events: bool = True
     death_threshold: float = 0.75
     win_proximity_px: float = 96.0
-    sparkle_threshold: float = 0.8
+    sparkle_threshold: float = 0.9
     win_min_frames: int = 3
     event_stride: int = 1
     win_llm_gate: bool = False

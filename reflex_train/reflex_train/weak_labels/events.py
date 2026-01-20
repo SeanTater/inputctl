@@ -17,9 +17,25 @@ from .gpu_matching import GPUTemplateMatcher, GPUVideoScanner
 
 # Keywords indicating an enemy has been attacked/killed
 ATTACKED_KEYWORDS = (
-    "stomp", "stomped", "flat", "flatten", "melting", "dead", "die",
-    "squash", "squished", "squish", "hurt", "hit", "kill", "killed", "crush",
-    "burn", "explode", "boom", "shatter",
+    "stomp",
+    "stomped",
+    "flat",
+    "flatten",
+    "melting",
+    "dead",
+    "die",
+    "squash",
+    "squished",
+    "squish",
+    "hurt",
+    "hit",
+    "kill",
+    "killed",
+    "crush",
+    "burn",
+    "explode",
+    "boom",
+    "shatter",
 )
 
 
@@ -45,16 +61,16 @@ class EventDetector:
         base_dir: str = "/usr/share/games/supertux2/images",
         sprite_scale: float = 0.5,
         death_threshold: float = 0.75,
-        attack_threshold: float = 0.8,
+        attack_threshold: float = 0.75,
         win_proximity_px: float = 96.0,
         sparkle_threshold: float = 0.8,
         win_min_frames: int = 3,
         frame_stride: int = 1,
         blank_frame_mean_threshold: float | None = None,
         blank_frame_std_threshold: float | None = None,
-        attack_min_gap: int = 5,
-        death_min_gap: int = 30,
-        win_min_gap: int = 30,
+        attack_min_gap: int = 1,  # one per frame
+        death_min_gap: int = 30 * 5,  # five seconds
+        win_min_gap: int = 30 * 60,  # one minute
         win_llm_gate: bool = False,
         win_llm_sample_stride: int = 30,
         win_llm_prompt: str = (
@@ -181,17 +197,17 @@ class EventDetector:
         try:
             frame_results = self._scanner.detect_events(
                 video_path,
-            self.tux_templates,
-            self.death_templates,
-            self.attacked_templates,
-            self.sparkle_templates,
-            self.death_threshold,
-            self.attack_threshold,
-            self.sparkle_threshold,
-            self.win_proximity_px,
-            frame_stride=self.frame_stride,
-            show_progress=show_progress,
-        )
+                self.tux_templates,
+                self.death_templates,
+                self.attacked_templates,
+                self.sparkle_templates,
+                self.death_threshold,
+                self.attack_threshold,
+                self.sparkle_threshold,
+                self.win_proximity_px,
+                frame_stride=self.frame_stride,
+                show_progress=show_progress,
+            )
         except Exception as e:
             print(f"Warning: Cannot process video {video_path}: {e}")
             return None
@@ -259,7 +275,10 @@ class EventDetector:
             print("Warning: Ollama not available; skipping win gating")
             return events
 
-        from reflex_train.data.dataset import _get_torchcodec_decoders, _ensure_nchw_frames
+        from reflex_train.data.dataset import (
+            _get_torchcodec_decoders,
+            _ensure_nchw_frames,
+        )
 
         try:
             VideoDecoder, _ = _get_torchcodec_decoders()

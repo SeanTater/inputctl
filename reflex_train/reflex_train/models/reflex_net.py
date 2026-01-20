@@ -2,14 +2,12 @@ import torch
 import torch.nn as nn
 from torchvision import models
 from ..data.keys import NUM_KEYS
-from ..data.intent import INTENTS
 
 
 class ReflexNet(nn.Module):
     def __init__(
         self,
         context_frames: int = 3,
-        goal_dim: int = 2,
         num_keys: int = NUM_KEYS,
         inv_dynamics: bool = False,
     ):
@@ -54,13 +52,7 @@ class ReflexNet(nn.Module):
         num_ftrs = self.backbone.fc.in_features
         self.backbone.fc = nn.Identity()
 
-        # 2. Goal Encoder
-        self.goal_encoder = nn.Sequential(
-            nn.Linear(goal_dim, 64), nn.ReLU(), nn.Linear(64, 64), nn.ReLU()
-        )
-
-        # 3. Fusion
-        fusion_dim = num_ftrs + 64
+        fusion_dim = num_ftrs
 
         # 4. Heads
 
@@ -79,11 +71,6 @@ class ReflexNet(nn.Module):
             nn.Sigmoid(),  # Force 0-1 range
         )
 
-        # Intent prediction from visual features only (for online use)
-        self.head_intent = nn.Sequential(
-            nn.Linear(num_ftrs, 128), nn.ReLU(), nn.Linear(128, len(INTENTS))
-        )
-
         # Value function for RL (predicts expected return from fused state)
         self.head_value = nn.Sequential(
             nn.Linear(fusion_dim, 128), nn.ReLU(), nn.Linear(128, 1)
@@ -94,7 +81,6 @@ class ReflexNet(nn.Module):
         # Auxiliary: Inverse Dynamics
         # Predict Action given State_t, State_{t+1}
         # Input: [Feat_t, Feat_{t+1}] -> size 2*num_ftrs
-        # Goal is irrelevant to physics.
         self.head_inv_dynamics = None
         if self.inv_dynamics_enabled:
             self.head_inv_dynamics = nn.Sequential(
@@ -106,13 +92,11 @@ class ReflexNet(nn.Module):
     def forward(
         self,
         pixel_stack: torch.Tensor,
-        goal_vector: torch.Tensor,
         next_pixel_stack: torch.Tensor | None = None,
     ):
         """
         Args:
             pixel_stack: (B, C*k, H, W) - current context
-            goal_vector: (B, goal_dim)
             next_pixel_stack: (B, 3, H, W) or (B, C*k, H, W) - optional.
                 If 3-channel, we shift the current stack and append the next frame
                 to build the t+1 stack for inverse dynamics.
@@ -121,17 +105,10 @@ class ReflexNet(nn.Module):
         # Extract Features
         features = self.backbone(pixel_stack)  # (B, 512)
 
-        # Goal Features
-        g_feat = self.goal_encoder(goal_vector)
-
-        # Fusion
-        fused = torch.cat([features, g_feat], dim=1)
-
         # Main Heads
-        keys_logits = self.head_keys(fused)
-        mouse_pos = self.head_mouse(fused)
-        intent_logits = self.head_intent(features)
-        value = self.head_value(fused).squeeze(-1)  # (B,) scalar value
+        keys_logits = self.head_keys(features)
+        mouse_pos = self.head_mouse(features)
+        value = self.head_value(features).squeeze(-1)  # (B,) scalar value
 
         # Auxiliary
         inv_dyn_logits = None
@@ -152,7 +129,7 @@ class ReflexNet(nn.Module):
                     torch.cat([features, next_features], dim=1)
                 )
 
-        return keys_logits, mouse_pos, inv_dyn_logits, intent_logits, value
+        return keys_logits, mouse_pos, inv_dyn_logits, value
 
     @staticmethod
     def _stack_next_frame(

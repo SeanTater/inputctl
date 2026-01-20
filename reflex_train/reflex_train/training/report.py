@@ -42,13 +42,11 @@ def _prepare_context(results: dict, checkpoint_path: str) -> dict:
     """Prepare template context with processed data."""
     # Extract sections
     keys = results.get("keys", {})
-    intent = results.get("intent", {})
     value = results.get("value", {})
     inv_dyn = results.get("inv_dyn")
     temporal = results.get("temporal")
     calibration = results.get("calibration")
     conditional = results.get("conditional")
-    intents = intent.get("intents", [])
 
     # Prepare chart data (Python handles sorting/slicing)
     per_key = keys.get("per_key", {})
@@ -59,16 +57,6 @@ def _prepare_context(results: dict, checkpoint_path: str) -> dict:
         "names": [k for k, _ in top_keys],
         "f1_scores": [v["f1"] for _, v in top_keys],
         "supports": [v["support"] for _, v in top_keys],
-    }
-
-    # Confusion matrix data
-    cm_norm = intent.get("confusion_matrix_normalized", [[]])
-    cm_text = [[f"{v:.2f}" for v in row] for row in cm_norm]
-
-    intent_chart = {
-        "confusion_matrix": cm_norm,
-        "confusion_matrix_text": cm_text,
-        "intents": intents,
     }
 
     # Calibration chart data
@@ -99,7 +87,6 @@ def _prepare_context(results: dict, checkpoint_path: str) -> dict:
     nav_sections = [
         ("summary", "Summary"),
         ("keys", "Keys Head"),
-        ("intent", "Intent Head"),
         ("value", "Value Head"),
     ]
     if inv_dyn:
@@ -116,15 +103,12 @@ def _prepare_context(results: dict, checkpoint_path: str) -> dict:
         "checkpoint_name": Path(checkpoint_path).name if checkpoint_path else "",
         "nav_sections": nav_sections,
         "keys": keys,
-        "intent": intent,
         "value": value,
         "inv_dyn": inv_dyn,
         "temporal": temporal,
         "calibration": calibration,
         "conditional": conditional,
-        "intents": intents,
         "keys_chart": keys_chart,
-        "intent_chart": intent_chart,
         "calibration_chart": calibration_chart,
         "per_key_table": per_key_table,
         "top_chatterers": top_chatterers,

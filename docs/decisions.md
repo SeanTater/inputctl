@@ -9,10 +9,9 @@ surprise a new contributor.
 - `reflex_train` is a separate Python project for training and weak labeling.
 - `reflex_infer` is a Rust ONNX inference stub to validate export + runtime wiring.
 
-## 2025-XX-XX: Offline weak labeling for intent
+## 2025-XX-XX: Offline weak labeling for events/returns
 
-- Intent labels are generated in a separate preprocessing step and stored as
-  `intent.jsonl` alongside recordings.
+- Weak labels focus on game events (death/win/attack) to build episodes + returns.
 - Game-specific heuristics (SuperTux sprites, etc.) live under `reflex_train/weak_labels/`.
 
 ## 2025-XX-XX: ONNX as the interchange format

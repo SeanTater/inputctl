@@ -468,7 +468,7 @@ class GPUVideoScanner:
     ) -> list[dict]:
         """Scan video and return per-frame sprite hit info.
 
-        Same output format as SuperTuxIntentLabeler._scan_video().
+        Same output format as the weak-label sprite scan.
 
         Returns:
             List of dicts with keys: enemy_near, enemy_attacked_near, loot_near

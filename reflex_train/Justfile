@@ -4,10 +4,10 @@ record DATASET_DIR=DATASET_DIR:
   cargo run --release --bin inputctl-record -- --fps 30 --output {{DATASET_DIR}}
 
 label DATASET_DIR=DATASET_DIR:
-  uv run python precompute_intents.py --data_dir {{DATASET_DIR}} --labeler keys
+  uv run python precompute_labels.py --data_dir {{DATASET_DIR}}
 
 label-all DATASET_DIR=DATASET_DIR:
-  uv run python precompute_intents.py --data_dir {{DATASET_DIR}} --labeler keys --overwrite true
+  uv run python precompute_labels.py --data_dir {{DATASET_DIR}} --overwrite true
 
 train DATASET_DIR=DATASET_DIR:
   uv run python -m reflex_train.training.train --data_dir {{DATASET_DIR}}

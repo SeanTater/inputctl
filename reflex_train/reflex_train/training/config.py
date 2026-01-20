@@ -1,7 +1,5 @@
 from pathlib import Path
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from reflex_train.data.intent import INTENTS
 import tomllib
 
 
@@ -19,13 +17,10 @@ class TrainConfig(BaseSettings):
     max_steps_per_epoch: int | None = None  # Limit steps per epoch (None = full dataset)
     context_frames: int = 3
     action_horizon: int = 2
-    goal_intent: str = "INFER"
-    intent_weight: float = 0.25
     seed: int = 1337
     log_interval: int = 10
     checkpoint_dir: str = "checkpoints"
     key_threshold: float = 0.5
-    require_intent_labels: bool = False
 
     # IQL settings (always enabled)
     gamma: float = 0.99  # Discount factor
@@ -37,15 +32,6 @@ class TrainConfig(BaseSettings):
     # Inverse dynamics (always enabled)
     inv_dyn_weight: float = 0.2  # Weight for inverse dynamics loss
     inv_dyn_use_action_horizon: bool = False
-
-    @field_validator("goal_intent")
-    @classmethod
-    def validate_goal_intent(cls, value):
-        if value == "INFER":
-            return value
-        if value not in INTENTS:
-            raise ValueError(f"goal_intent must be one of {INTENTS} or 'INFER'")
-        return value
 
     @classmethod
     def from_toml(cls, path: str | Path) -> "TrainConfig":

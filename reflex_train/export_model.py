@@ -4,7 +4,6 @@ import os
 import torch
 import torch.nn as nn
 from reflex_train.models.reflex_net import ReflexNet
-from reflex_train.data.intent import INTENTS
 from reflex_train.data.keys import NUM_KEYS, TRACKED_KEYS
 
 
@@ -15,15 +14,14 @@ class ReflexNetExport(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, pixels, goal):
-        keys_logits, mouse_pos, _, intent_logits, value = self.model(pixels, goal)
-        return keys_logits, mouse_pos, intent_logits, value
+    def forward(self, pixels):
+        keys_logits, mouse_pos, _, value = self.model(pixels)
+        return keys_logits, mouse_pos, value
 
 
 def build_model(checkpoint_path, use_random):
     model = ReflexNet(
         context_frames=3,
-        goal_dim=len(INTENTS),
         num_keys=NUM_KEYS,
         inv_dynamics=False,
     )
@@ -47,10 +45,6 @@ def write_manifest(output_path, height, width):
                 "height": height,
                 "width": width,
             },
-            "goal": {
-                "shape": ["batch", len(INTENTS)],
-                "intents": INTENTS,
-            },
         },
         "outputs": {
             "keys_logits": {
@@ -61,10 +55,6 @@ def write_manifest(output_path, height, width):
                 "shape": ["batch", 2],
                 "range": "0..1",
             },
-            "intent_logits": {
-                "shape": ["batch", len(INTENTS)],
-                "intents": INTENTS,
-            },
             "value": {
                 "shape": ["batch"],
                 "description": "Expected return estimate (higher = better state)",
@@ -72,7 +62,6 @@ def write_manifest(output_path, height, width):
         },
         "notes": [
             "pixels are stacked as [t-2, t-1, t], each RGB",
-            "goal is a one-hot intent vector",
             "value is the estimated return from the current state",
         ],
     }
@@ -88,23 +77,19 @@ def export_onnx(checkpoint_path, output_path, height, width, use_random):
     export_model.eval()
 
     pixels = torch.zeros(1, 9, height, width, dtype=torch.float32)
-    goal = torch.zeros(1, len(INTENTS), dtype=torch.float32)
-
     dynamic_axes = {
         "pixels": {0: "batch", 2: "height", 3: "width"},
-        "goal": {0: "batch"},
         "keys_logits": {0: "batch"},
         "mouse_pos": {0: "batch"},
-        "intent_logits": {0: "batch"},
         "value": {0: "batch"},
     }
 
     torch.onnx.export(
         export_model,
-        (pixels, goal),
+        (pixels,),
         output_path,
-        input_names=["pixels", "goal"],
-        output_names=["keys_logits", "mouse_pos", "intent_logits", "value"],
+        input_names=["pixels"],
+        output_names=["keys_logits", "mouse_pos", "value"],
         dynamic_axes=dynamic_axes,
         opset_version=18,
     )

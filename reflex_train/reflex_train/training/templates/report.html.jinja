@@ -17,16 +17,6 @@
 </tr>
 {% endmacro %}
 
-{% macro intent_row(name, metrics) %}
-<tr>
-    <td>{{ name }}</td>
-    <td class="{{ metrics.get('f1', 0)|f1_class }}">{{ "%.3f"|format(metrics.get('f1', 0)) }}</td>
-    <td>{{ "%.3f"|format(metrics.get('precision', 0)) }}</td>
-    <td>{{ "%.3f"|format(metrics.get('recall', 0)) }}</td>
-    <td>{{ "{:,}".format(metrics.get('support', 0)) }}</td>
-</tr>
-{% endmacro %}
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -190,7 +180,6 @@
                 <div class="card">
                     <div class="metric-grid">
                         {{ metric_card(keys.get('f1_micro', 0), "Keys F1 (micro)") }}
-                        {{ metric_card(intent.get('accuracy', 0), "Intent Accuracy") }}
                         {{ metric_card(value.get('pearson_r', 0), "Value Correlation") }}
                         <div class="metric">
                             <div class="metric-value">{{ "{:,}".format(keys.get('total_samples', 0)) }}</div>
@@ -228,39 +217,6 @@
                         <tbody>
                             {% for name, metrics in per_key_table %}
                             {{ key_row(name, metrics) }}
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-
-            <section id="intent">
-                <h2>Intent Head (Multi-Class)</h2>
-                <div class="explanation">
-                    <strong>What this measures:</strong> The model classifies the player's current intent from {{ intents|length }} categories: {{ intents|join(', ') }}.
-                    The confusion matrix shows what the model predicts (columns) for each true intent (rows).
-                    Diagonal values are correct predictions. Look for patterns in misclassification (e.g., WAIT often confused with RUN).
-                </div>
-                <div class="card">
-                    <div class="metric-grid">
-                        {{ metric_card(intent.get('accuracy', 0), "Accuracy") }}
-                        {{ metric_card(intent.get('f1_macro', 0), "F1 Macro") }}
-                        {{ metric_card(intent.get('f1_weighted', 0), "F1 Weighted") }}
-                    </div>
-                </div>
-                <div class="card">
-                    <h3>Confusion Matrix (Row-Normalized)</h3>
-                    <div class="chart" id="intent-chart"></div>
-                </div>
-                <div class="card">
-                    <h3>Per-Intent Breakdown</h3>
-                    <table>
-                        <thead>
-                            <tr><th>Intent</th><th>F1</th><th>Precision</th><th>Recall</th><th>Support</th></tr>
-                        </thead>
-                        <tbody>
-                            {% for name in intents %}
-                            {{ intent_row(name, intent.get('per_class', {}).get(name, {})) }}
                             {% endfor %}
                         </tbody>
                     </table>
@@ -309,7 +265,6 @@
                 <h2>Temporal Coherence</h2>
                 <div class="explanation">
                     <strong>What this measures:</strong> How stable are predictions over time? Lower chatter means fewer flip-flops between adjacent frames.
-                    Stability ratio compares predicted intent run lengths to ground truth (1.0 = perfect match).
                     Chatter &lt;0.1 is good; &gt;0.3 suggests jittery predictions.
                 </div>
                 <div class="card">
@@ -317,12 +272,6 @@
                         <div class="metric">
                             <div class="metric-value {{ temporal.get('key_chatter_rate', 0)|chatter_class }}">{{ "%.3f"|format(temporal.get('key_chatter_rate', 0)) }}</div>
                             <div class="metric-label">Key Chatter Rate</div>
-                        </div>
-                        {{ metric_card(temporal.get('intent_mean_run_pred', 0), "Pred Run Length", "%.1f") }}
-                        {{ metric_card(temporal.get('intent_mean_run_gt', 0), "GT Run Length", "%.1f") }}
-                        <div class="metric">
-                            <div class="metric-value {{ temporal.get('intent_stability_ratio', 0)|stability_class }}">{{ "%.2f"|format(temporal.get('intent_stability_ratio', 0)) }}</div>
-                            <div class="metric-label">Stability Ratio</div>
                         </div>
                     </div>
                 </div>
@@ -391,7 +340,7 @@
                 <h2>Conditional Performance</h2>
                 <div class="explanation">
                     <strong>What this measures:</strong> How does performance vary by context?
-                    F1 by intent shows model strength per player state. F1 by key rarity shows performance on rare vs common keys.
+                    F1 by key rarity shows performance on rare vs common keys.
                     Episode boundary performance compares accuracy near game-over events vs normal play.
                 </div>
                 <div class="card">
@@ -406,22 +355,6 @@
                         </div>
                     </div>
                 </div>
-                {% if conditional.get('key_f1_by_intent') %}
-                <div class="card">
-                    <h3>Key F1 by Intent</h3>
-                    <table>
-                        <thead><tr><th>Intent</th><th>Key F1 (micro)</th></tr></thead>
-                        <tbody>
-                            {% for intent_name, f1_score in conditional.get('key_f1_by_intent', {}).items()|sort(attribute='1', reverse=true) %}
-                            <tr>
-                                <td>{{ intent_name }}</td>
-                                <td class="{{ f1_score|f1_class }}">{{ "%.3f"|format(f1_score) }}</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-                {% endif %}
                 {% if conditional.get('key_f1_by_rarity') %}
                 <div class="card">
                     <h3>Key F1 by Rarity</h3>
@@ -459,26 +392,6 @@
             xaxis: { tickangle: -45 },
             yaxis: { title: 'F1 Score', range: [0, 1] },
             margin: { t: 20, b: 100 }
-        }, { responsive: true });
-
-        // Intent confusion matrix heatmap
-        Plotly.newPlot('intent-chart', [{
-            z: {{ intent_chart.confusion_matrix|tojson }},
-            x: {{ intent_chart.intents|tojson }},
-            y: {{ intent_chart.intents|tojson }},
-            type: 'heatmap',
-            colorscale: [[0, '#1a1a2e'], [0.5, '#3ba888'], [1, '#4ecca3']],
-            showscale: true,
-            text: {{ intent_chart.confusion_matrix_text|tojson }},
-            texttemplate: '%{text}',
-            hovertemplate: 'True: %{y}<br>Pred: %{x}<br>Rate: %{z:.2f}<extra></extra>'
-        }], {
-            paper_bgcolor: 'transparent',
-            plot_bgcolor: 'transparent',
-            font: { color: '#e8e8e8' },
-            xaxis: { title: 'Predicted', side: 'bottom' },
-            yaxis: { title: 'True', autorange: 'reversed' },
-            margin: { t: 20 }
         }, { responsive: true });
 
         {% if calibration_chart %}

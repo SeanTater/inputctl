@@ -4,7 +4,7 @@ This document describes how reflex_train moves from behavior cloning to offline 
 
 ## Goals
 
-- Learn a reflex policy that can execute key presses from vision + intent.
+- Learn a reflex policy that can execute key presses from vision.
 - Use offline signals (win/death events) to compute returns.
 - Let a value function bias the policy toward higher-return behavior.
 - Keep the model compact by sharing the vision backbone.
@@ -12,8 +12,7 @@ This document describes how reflex_train moves from behavior cloning to offline 
 ## Data flow (offline)
 
 1. Record sessions into `recording.mp4`, `frames.jsonl`, `inputs.jsonl`.
-2. `precompute_intents.py` writes:
-   - `intent.jsonl` (weak intents from sprite proximity + keypresses)
+2. `precompute_labels.py` writes:
    - `events.jsonl` (death/win/attack markers via GPU template matching)
    - `episodes.jsonl` + `returns.jsonl` (terminal rewards + attack bonuses)
 3. Training streams frames per video so decoding stays sequential.
@@ -27,11 +26,10 @@ with torchcodec for video decoding. Falls back to CPU PyTorch if CUDA is unavail
 
 - Policy (keys): multi-label logits over tracked keys.
 - Policy (mouse): regression head (currently supervised by dummy labels).
-- Intent: predicts intent from visual features.
-- Value: predicts expected return for state/goal.
+- Value: predicts expected return for state.
 - Inverse dynamics (aux): predicts the current action from a (state, next_state) pair.
 
-All heads share the same ResNet-18 backbone. The goal vector is fused only for policy/value heads.
+All heads share the same ResNet-18 backbone.
 
 ## Offline RL flavor (IQL-style)
 

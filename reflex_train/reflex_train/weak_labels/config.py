@@ -8,12 +8,8 @@ class LabelingConfig(BaseSettings):
     )
 
     data_dir: str
-    labeler: str = "supertux"
-    intent_horizon: int = 10
     sprite_scale: float = 0.5
     sprite_threshold: float = 0.85
-    sprite_proximity: float = 96.0
-    intent_stride: int = 1
     base_dir: str = "/usr/share/games/supertux2/images"
     overwrite: bool = False
 

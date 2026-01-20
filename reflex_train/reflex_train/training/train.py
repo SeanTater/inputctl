@@ -12,7 +12,6 @@ from torchvision import transforms
 from tqdm import tqdm
 from reflex_train.data.dataset import MultiStreamDataset, StreamingDataset
 from reflex_train.data.keys import NUM_KEYS
-from reflex_train.data.intent import INTENTS
 from reflex_train.models.reflex_net import ReflexNet
 
 
@@ -52,10 +51,6 @@ def find_run_dirs(data_dir):
     ]
 
 
-def has_intent_logs(run_dirs):
-    return any(os.path.exists(os.path.join(d, "intent.jsonl")) for d in run_dirs)
-
-
 def write_config_snapshot(cfg, checkpoint_dir):
     os.makedirs(checkpoint_dir, exist_ok=True)
     cfg_path = os.path.join(checkpoint_dir, "config.json")
@@ -73,24 +68,13 @@ def train(cfg):
         print("No run directories found.")
         return
 
-    if (
-        cfg.goal_intent == "INFER"
-        and cfg.require_intent_labels
-        and not has_intent_logs(run_dirs)
-    ):
-        raise RuntimeError(
-            "No intent.jsonl found; run the weak-label precompute step first."
-        )
-
     transform = get_train_transform(image_size=224)
 
     dataset = MultiStreamDataset(
         run_dirs=run_dirs,
         context_frames=cfg.context_frames,
         transform=transform,
-        goal_intent=None if cfg.goal_intent == "INFER" else cfg.goal_intent,
         action_horizon=cfg.action_horizon,
-        intent_labeler=None,
     )
 
     val_size = int(len(dataset) * cfg.val_split)
@@ -113,7 +97,6 @@ def train(cfg):
 
     model = ReflexNet(
         context_frames=cfg.context_frames,
-        goal_dim=len(INTENTS),
         num_keys=NUM_KEYS,
         inv_dynamics=True,
     ).to(device)
@@ -129,7 +112,6 @@ def train(cfg):
 
     # Loss functions (IQL always uses unreduced for advantage weighting)
     criterion_keys = nn.BCEWithLogitsLoss(reduction="none")
-    criterion_intent = nn.CrossEntropyLoss(reduction="none")
     criterion_mouse = nn.MSELoss()
     criterion_inv_dyn = nn.BCEWithLogitsLoss()
 
@@ -156,17 +138,15 @@ def train(cfg):
                 break
             step_start = time.time()
             pixels = batch["pixels"].to(device, non_blocking=True)
-            goals = batch["goal"].to(device, non_blocking=True)
             target_keys = batch["label_keys"].to(device, non_blocking=True)
             target_mouse = batch["label_mouse"].to(device, non_blocking=True)
-            target_intent = batch["label_intent"].to(device, non_blocking=True)
             target_returns = batch["return"].to(device, non_blocking=True)
             current_keys = batch["current_keys"].to(device, non_blocking=True)
             next_pixels = batch["next_pixels"].to(device, non_blocking=True)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                keys_logit, mouse_out, inv_dyn_logits, intent_logits, value = model(
-                    pixels, goals, next_pixels
+                keys_logit, mouse_out, inv_dyn_logits, value = model(
+                    pixels, next_pixels
                 )
 
                 # IQL advantage weighting (always enabled)
@@ -182,10 +162,6 @@ def train(cfg):
                 ).mean(dim=1)
                 loss_k = (loss_k_per_sample * weights).mean()
 
-                loss_i_per_sample = criterion_intent(
-                    intent_logits, target_intent
-                )
-                loss_i = (loss_i_per_sample * weights).mean()
                 loss_m = criterion_mouse(mouse_out, target_mouse)
 
                 # Inverse dynamics (always enabled)
@@ -197,7 +173,6 @@ def train(cfg):
                 loss = (
                     loss_k
                     + loss_m
-                    + cfg.intent_weight * loss_i
                     + cfg.value_weight * loss_v
                     + cfg.inv_dyn_weight * loss_inv
                 )
@@ -210,7 +185,6 @@ def train(cfg):
             train_metrics.update_keys(
                 keys_logit.detach(), target_keys, cfg.key_threshold
             )
-            train_metrics.update_intent(intent_logits.detach(), target_intent)
 
             step_times.append(time.time() - step_start)
 
@@ -221,7 +195,6 @@ def train(cfg):
                     {
                         "loss": f"{summary['loss']:.4f}",
                         "k_f1": f"{summary['key_f1']:.3f}",
-                        "i_acc": f"{summary['intent_acc']:.3f}",
                         "step_s": f"{avg_step:.2f}",
                     }
                 )
@@ -232,7 +205,6 @@ def train(cfg):
             device,
             criterion_keys,
             criterion_mouse,
-            criterion_intent,
             criterion_inv_dyn,
             cfg,
         )
@@ -243,8 +215,7 @@ def train(cfg):
             f"Epoch {epoch} Done. "
             f"Train Loss: {train_metrics.summary()['loss']:.4f}, "
             f"Val Loss: {val_summary['loss']:.4f}, "
-            f"Val K-F1: {val_summary['key_f1']:.3f}, "
-            f"Val I-Acc: {val_summary['intent_acc']:.3f}. "
+            f"Val K-F1: {val_summary['key_f1']:.3f}. "
             f"Step: {avg_step:.2f}s. "
             f"Time: {elapsed:.1f}s"
         )
@@ -254,7 +225,7 @@ def train(cfg):
         torch.save(model.state_dict(), ckpt_path)
 
 
-def validate(model, loader, device, crit_k, crit_m, crit_i, crit_inv, cfg):
+def validate(model, loader, device, crit_k, crit_m, crit_inv, cfg):
     model.eval()
     metrics = RunningMetrics()
     with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -262,15 +233,13 @@ def validate(model, loader, device, crit_k, crit_m, crit_i, crit_inv, cfg):
             if cfg.max_steps_per_epoch and batch_idx >= cfg.max_steps_per_epoch:
                 break
             pixels = batch["pixels"].to(device, non_blocking=True)
-            goals = batch["goal"].to(device, non_blocking=True)
             target_keys = batch["label_keys"].to(device, non_blocking=True)
             target_mouse = batch["label_mouse"].to(device, non_blocking=True)
-            target_intent = batch["label_intent"].to(device, non_blocking=True)
             target_returns = batch["return"].to(device, non_blocking=True)
             current_keys = batch["current_keys"].to(device, non_blocking=True)
 
-            k, m, inv_dyn_logits, i, v = model(
-                pixels, goals, batch["next_pixels"].to(device, non_blocking=True)
+            k, m, inv_dyn_logits, v = model(
+                pixels, batch["next_pixels"].to(device, non_blocking=True)
             )
 
             # IQL advantage weighting (always enabled)
@@ -281,7 +250,6 @@ def validate(model, loader, device, crit_k, crit_m, crit_i, crit_inv, cfg):
             weights = weights / weights.mean()
 
             loss_k = (crit_k(k, target_keys).mean(dim=1) * weights).mean()
-            loss_i = (crit_i(i, target_intent) * weights).mean()
             loss_m = crit_m(m, target_mouse)
 
             # Inverse dynamics (always enabled)
@@ -293,12 +261,10 @@ def validate(model, loader, device, crit_k, crit_m, crit_i, crit_inv, cfg):
             loss = (
                 loss_k
                 + loss_m
-                + cfg.intent_weight * loss_i
                 + cfg.value_weight * loss_v
                 + cfg.inv_dyn_weight * loss_inv
             )
             metrics.update_loss(loss.item())
             metrics.update_keys(k, target_keys, cfg.key_threshold)
-            metrics.update_intent(i, target_intent)
 
     return metrics.summary()

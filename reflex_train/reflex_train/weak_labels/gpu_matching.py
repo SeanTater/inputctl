@@ -370,7 +370,7 @@ class GPUVideoScanner:
         sprite_scale: float = 0.5,
         blank_frame_mean_threshold: float | None = None,
         blank_frame_std_threshold: float | None = None,
-        max_templates_per_batch: int | None = 16,
+        max_templates_per_batch: int | None = 128,
     ):
         self.matcher = matcher or GPUTemplateMatcher(
             max_templates_per_batch=max_templates_per_batch

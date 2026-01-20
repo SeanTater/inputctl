@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::primitives::screen::Region;
+use crate::primitives::screen::{list_windows, Region};
 use arrow::array::{Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -100,6 +100,205 @@ fn write_inputs_parquet(path: &PathBuf, events: &[EventRecord]) -> std::result::
     Ok(())
 }
 
+fn clamp_crop_region(frame_width: u32, frame_height: u32, region: Region) -> Result<Region> {
+    if region.x < 0 || region.y < 0 {
+        return Err(Error::ScreenshotFailed(format!(
+            "Crop origin must be non-negative: {:?}",
+            region
+        )));
+    }
+
+    let max_x = frame_width as i32;
+    let max_y = frame_height as i32;
+    let end_x = region.x + region.width as i32;
+    let end_y = region.y + region.height as i32;
+
+    if end_x > max_x || end_y > max_y {
+        return Err(Error::ScreenshotFailed(format!(
+            "Crop region {:?} out of bounds for frame {}x{}",
+            region, frame_width, frame_height
+        )));
+    }
+
+    let mut adjusted = region;
+    if adjusted.width % 2 != 0 {
+        adjusted.width -= 1;
+    }
+    if adjusted.height % 2 != 0 {
+        adjusted.height -= 1;
+    }
+
+    if adjusted.width == 0 || adjusted.height == 0 {
+        return Err(Error::ScreenshotFailed(format!(
+            "Crop region {:?} is too small after even adjustment",
+            region
+        )));
+    }
+
+    Ok(adjusted)
+}
+
+fn crop_rgba(frame_width: u32, frame_height: u32, rgba: &[u8], region: Region) -> Result<Vec<u8>> {
+    let expected_len = (frame_width * frame_height * 4) as usize;
+    if rgba.len() < expected_len {
+        return Err(Error::ScreenshotFailed(format!(
+            "Frame buffer too small: {} < {}",
+            rgba.len(),
+            expected_len
+        )));
+    }
+
+    let bytes_per_pixel = 4usize;
+    let src_stride = frame_width as usize * bytes_per_pixel;
+    let dst_stride = region.width as usize * bytes_per_pixel;
+    let start_x = region.x as usize * bytes_per_pixel;
+    let start_y = region.y as usize;
+
+    let mut out = vec![0u8; (region.width * region.height * 4) as usize];
+    for row in 0..region.height as usize {
+        let src_row = (start_y + row) * src_stride + start_x;
+        let dst_row = row * dst_stride;
+        let src_slice = &rgba[src_row..src_row + dst_stride];
+        let dst_slice = &mut out[dst_row..dst_row + dst_stride];
+        dst_slice.copy_from_slice(src_slice);
+    }
+
+    Ok(out)
+}
+
+fn scale_region_for_frame(
+    region: Region,
+    frame_width: u32,
+    frame_height: u32,
+    stream_size: Option<(u32, u32)>,
+) -> Region {
+    let Some((stream_width, stream_height)) = stream_size else {
+        return region;
+    };
+    if stream_width == 0 || stream_height == 0 {
+        return region;
+    }
+
+    let scale_x = frame_width as f32 / stream_width as f32;
+    let scale_y = frame_height as f32 / stream_height as f32;
+    if (scale_x - scale_y).abs() > 0.01 || scale_x <= 0.0 {
+        return region;
+    }
+
+    let scaled = Region {
+        x: (region.x as f32 * scale_x).round() as i32,
+        y: (region.y as f32 * scale_y).round() as i32,
+        width: (region.width as f32 * scale_x).round() as u32,
+        height: (region.height as f32 * scale_y).round() as u32,
+    };
+
+    scaled
+}
+
+fn parse_region_string(region: &str) -> Result<Region> {
+    let parts: Vec<&str> = region.trim().split(',').collect();
+    if parts.len() != 4 {
+        return Err(Error::ScreenshotFailed(format!(
+            "Region must be x,y,w,h; got '{}'",
+            region
+        )));
+    }
+    let x = parts[0]
+        .parse()
+        .map_err(|_| Error::ScreenshotFailed("Invalid x".to_string()))?;
+    let y = parts[1]
+        .parse()
+        .map_err(|_| Error::ScreenshotFailed("Invalid y".to_string()))?;
+    let width = parts[2]
+        .parse()
+        .map_err(|_| Error::ScreenshotFailed("Invalid w".to_string()))?;
+    let height = parts[3]
+        .parse()
+        .map_err(|_| Error::ScreenshotFailed("Invalid h".to_string()))?;
+    Ok(Region {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn slurp_region(stream_size: Option<(u32, u32)>, frame_width: u32, frame_height: u32) -> Result<Option<Region>> {
+    let output = match Command::new("slurp")
+        .args(["-f", "%x,%y,%w,%h"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("slurp not found; install it or pass --region x,y,w,h");
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(Error::ScreenshotFailed(format!(
+                "Failed to run slurp: {}",
+                e
+            )));
+        }
+    };
+
+    if !output.status.success() {
+        eprintln!("slurp exited with {}", output.status);
+        return Ok(None);
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let region = parse_region_string(&raw)?;
+    let scaled = scale_region_for_frame(region, frame_width, frame_height, stream_size);
+    Ok(Some(scaled))
+}
+
+fn pick_window_region(
+    stream_size: Option<(u32, u32)>,
+    frame_width: u32,
+    frame_height: u32,
+) -> Result<Option<Region>> {
+    let windows = match list_windows() {
+        Ok(windows) => windows,
+        Err(e) => {
+            eprintln!("Failed to list windows: {}", e);
+            return slurp_region(stream_size, frame_width, frame_height);
+        }
+    };
+
+    if windows.is_empty() {
+        eprintln!("No windows found for selection.");
+        return slurp_region(stream_size, frame_width, frame_height);
+    }
+
+    if !std::io::stdout().is_terminal() {
+        return Err(Error::ScreenshotFailed(
+            "Window selection requires a terminal; pass --region".to_string(),
+        ));
+    }
+
+    let selections: Vec<String> = windows
+        .iter()
+        .map(|w| format!("{} ({}x{} @ {},{})", w.title, w.region.width, w.region.height, w.region.x, w.region.y))
+        .collect();
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select Window For Crop")
+        .items(&selections)
+        .default(0)
+        .interact()
+        .map_err(|e| Error::ScreenshotFailed(format!("Window selection failed: {}", e)))?;
+
+    let picked = windows
+        .get(selection)
+        .map(|w| w.region)
+        .map(|r| scale_region_for_frame(r, frame_width, frame_height, stream_size))
+        .unwrap_or_else(|| windows[0].region);
+    Ok(Some(picked))
+}
+
 pub fn run_recorder(
     output_dir: PathBuf,
     fps: u64,
@@ -181,31 +380,43 @@ pub fn run_recorder(
 
     // 5. Start portal capture and determine dimensions from first frame
     let capture = crate::capture::PortalCapture::connect(None)?;
+    println!("{}", capture.stream_debug_line());
+    let stream_size = capture.stream_size();
     let first_frame = capture
         .next_frame(Duration::from_millis(2000))
         .map_err(|e| Error::ScreenshotFailed(format!("Capture failed: {}", e)))?;
+    println!(
+        "Captured source frame: {}x{} ({} bytes)",
+        first_frame.width,
+        first_frame.height,
+        first_frame.rgba.len()
+    );
 
-    let mut width = first_frame.width;
-    let mut height = first_frame.height;
-
-    // Ensure even dimensions for yuv420p
-    if width % 2 != 0 {
-        width -= 1;
-    }
-    if height % 2 != 0 {
-        height -= 1;
-    }
-
-    // We might need to adjust the actual crop region to match these even dimensions if we changed them.
-    let _final_region = if let Some(mut r) = target_region {
-        r.width = width;
-        r.height = height;
-        Some(r)
+    let base_region = if let Some(region) = target_region {
+        region
+    } else if let Some(region) = capture.stream_region() {
+        println!("Using portal stream region: {:?}", region);
+        region
+    } else if let Some(region) = pick_window_region(stream_size, first_frame.width, first_frame.height)? {
+        println!("Using selected window region: {:?}", region);
+        region
     } else {
-        None
+        println!("Portal did not report a stream region; using full frame.");
+        Region {
+            x: 0,
+            y: 0,
+            width: first_frame.width,
+            height: first_frame.height,
+        }
     };
+    let crop_region = clamp_crop_region(first_frame.width, first_frame.height, base_region)?;
+    let width = crop_region.width;
+    let height = crop_region.height;
 
-    println!("Recording dimensions: {}x{}", width, height);
+    println!(
+        "Recording dimensions: {}x{} (crop {},{} @ {}x{})",
+        width, height, crop_region.x, crop_region.y, width, height
+    );
     let video_path = session_dir.join("recording.mp4");
 
     let mut ffmpeg = Command::new("ffmpeg")
@@ -302,7 +513,7 @@ pub fn run_recorder(
         };
 
         let mut rgba = frame.rgba;
-        let expected_len = (width * height * 4) as usize;
+        let expected_len = (frame.width * frame.height * 4) as usize;
         if rgba.len() != expected_len {
             if rgba.len() > expected_len {
                 rgba.truncate(expected_len);
@@ -310,6 +521,8 @@ pub fn run_recorder(
                 rgba.resize(expected_len, 0);
             }
         }
+
+        let rgba = crop_rgba(frame.width, frame.height, &rgba, crop_region)?;
 
         let encode_start = std::time::Instant::now();
         if let Err(e) = ffmpeg_stdin.write_all(&rgba) {

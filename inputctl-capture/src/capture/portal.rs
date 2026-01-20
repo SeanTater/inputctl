@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::primitives::screen::Region;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType, Stream};
 use ashpd::desktop::PersistMode;
 use gstreamer as gst;
@@ -102,6 +103,38 @@ impl PortalCapture {
             start_time: Instant::now(),
             _stream: stream,
         })
+    }
+
+    pub fn stream_region(&self) -> Option<Region> {
+        let (x, y) = self._stream.position()?;
+        let (width, height) = self._stream.size()?;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        Some(Region {
+            x,
+            y,
+            width: width as u32,
+            height: height as u32,
+        })
+    }
+
+    pub fn stream_size(&self) -> Option<(u32, u32)> {
+        let (width, height) = self._stream.size()?;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        Some((width as u32, height as u32))
+    }
+
+    pub fn stream_debug_line(&self) -> String {
+        format!(
+            "Portal stream: id={:?} source={:?} position={:?} size={:?}",
+            self._stream.id(),
+            self._stream.source_type(),
+            self._stream.position(),
+            self._stream.size()
+        )
     }
 
     pub fn next_frame(&self, timeout: Duration) -> Result<CaptureFrame> {

@@ -6,6 +6,7 @@
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::process::Command;
 use std::sync::Mutex;
@@ -202,8 +203,97 @@ pub struct Window {
     pub region: Region,
 }
 
+fn list_windows_gnome() -> Result<Vec<Window>> {
+    let conn = Connection::session()
+        .map_err(|e| Error::ScreenshotFailed(format!("DBus connection failed: {}", e)))?;
+
+    let proxy = zbus::blocking::Proxy::new(
+        &conn,
+        "org.gnome.Shell",
+        "/org/gnome/Shell",
+        "org.gnome.Shell",
+    )
+    .map_err(|e| {
+        Error::ScreenshotFailed(format!("GNOME Shell interface not found: {}", e))
+    })?;
+
+    let script = r#"
+        (() => {
+            const focused = global.display.get_focus_window();
+            const windows = global.get_window_actors().map(a => {
+                const w = a.meta_window;
+                const rect = w.get_frame_rect();
+                return {
+                    id: String(w.get_id()),
+                    title: w.get_title(),
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    focused: w === focused,
+                };
+            });
+            return JSON.stringify(windows);
+        })()
+    "#;
+
+    let (ok, output): (bool, String) = proxy
+        .call_method("Eval", &(script))
+        .map_err(|e| Error::ScreenshotFailed(format!("GNOME Eval failed: {}", e)))?
+        .body()
+        .deserialize()
+        .map_err(|e| Error::ScreenshotFailed(format!("Invalid GNOME Eval response: {}", e)))?;
+
+    if !ok {
+        return Err(Error::ScreenshotFailed(format!(
+            "GNOME Eval error: {}",
+            output
+        )));
+    }
+
+    let parsed: Value = serde_json::from_str(&output)
+        .map_err(|e| Error::ScreenshotFailed(format!("Invalid GNOME JSON: {}", e)))?;
+    let arr = parsed.as_array().ok_or_else(|| {
+        Error::ScreenshotFailed("GNOME Eval returned non-array JSON".to_string())
+    })?;
+
+    let mut windows = Vec::new();
+    for item in arr {
+        let Some(obj) = item.as_object() else { continue };
+        let title = obj.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let x = obj.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let y = obj.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let width = obj.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let height = obj.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let focused = obj
+            .get("focused")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let window = Window {
+            id,
+            title,
+            region: Region {
+                x,
+                y,
+                width,
+                height,
+            },
+        };
+
+        if focused {
+            windows.insert(0, window);
+        } else {
+            windows.push(window);
+        }
+    }
+
+    Ok(windows)
+}
+
 /// List all available windows (clients) from KWin
-pub fn list_windows() -> Result<Vec<Window>> {
+fn list_windows_kwin() -> Result<Vec<Window>> {
     // Generate a unique marker for this query
     let marker = format!("VISIONCTL_WINDOWS_{}", std::process::id());
 
@@ -326,6 +416,24 @@ pub fn list_windows() -> Result<Vec<Window>> {
     // The marker includes process ID, so that helps uniqueness per run.
     windows.reverse();
     Ok(windows)
+}
+
+/// List all available windows (clients)
+pub fn list_windows() -> Result<Vec<Window>> {
+    match list_windows_gnome() {
+        Ok(windows) => Ok(windows),
+        Err(err) => {
+            let should_fallback = match &err {
+                Error::ScreenshotFailed(msg) => msg.contains("GNOME Shell interface not found"),
+                _ => false,
+            };
+            if should_fallback {
+                list_windows_kwin()
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 /// Find a window by title substring

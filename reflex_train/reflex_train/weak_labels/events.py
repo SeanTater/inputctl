@@ -69,7 +69,6 @@ class EventDetector:
         blank_frame_std_threshold: float | None = 10.0,
         attack_min_gap: int = 1,  # one per frame
         death_min_gap: int = 30 * 5,  # five seconds
-        scale_by_resolution: dict[str, float] | None = None,
     ):
         self.base_dir = base_dir
         self.sprite_scale = sprite_scale
@@ -84,13 +83,12 @@ class EventDetector:
         self.death_min_gap = death_min_gap
 
         # GPU matching setup
-        self._matcher = GPUTemplateMatcher()
+        self._matcher = GPUTemplateMatcher(max_templates_per_batch=128)
         self._scanner = GPUVideoScanner(
             matcher=self._matcher,
             sprite_scale=sprite_scale,
             blank_frame_mean_threshold=blank_frame_mean_threshold,
             blank_frame_std_threshold=blank_frame_std_threshold,
-            scale_by_resolution=scale_by_resolution,
         )
 
         # Load templates

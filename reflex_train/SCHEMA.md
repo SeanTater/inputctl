@@ -8,10 +8,9 @@ This document describes the Parquet schema for all dataset files in the reflex_t
 |------|--------|-------------|
 | `frames.parquet` | `inputctl-record` | Frame timing metadata from recorder |
 | `inputs.parquet` | `inputctl-record` | Keyboard events during recording |
-| `intent.parquet` | `precompute.py` | Per-frame intent labels |
-| `events.parquet` | `precompute.py` | Death/win/attack events |
-| `episodes.parquet` | `precompute.py` | Episode boundaries |
-| `returns.parquet` | `precompute.py` | Per-frame discounted returns |
+| `events.parquet` | `precompute_labels.py` | Death/win/attack events |
+| `episodes.parquet` | `precompute_labels.py` | Episode boundaries |
+| `returns.parquet` | `precompute_labels.py` | Per-frame discounted returns |
 | `recording.mp4` | `inputctl-record` | Video frames (not Parquet) |
 
 ## Schema Definitions
@@ -45,30 +44,17 @@ Keyboard events captured during recording.
 **Written by:** `inputctl-capture/src/recorder.rs`
 **Read by:** `reflex_train/data/logs.py`
 
-### intent.parquet
-
-Per-frame intent labels from weak labeling.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `frame_idx` | Int64 | Frame index |
-| `intent` | Utf8 | One of: LOOT, EVADE, ATTACK, CLIMB, LEAP, RUN, WAIT |
-| `timestamp` | Int64 | Milliseconds since Unix epoch (optional) |
-
-**Written by:** `reflex_train/weak_labels/precompute.py`
-**Read by:** `reflex_train/data/dataset.py`, `inputctl-reflex/src/main.rs`
-
 ### events.parquet
 
-Terminal and attack events detected in gameplay.
+Terminal and attack events detected in gameplay (wins from key presses).
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `frame_idx` | Int64 | Frame where event occurred |
-| `event` | Utf8 | "DEATH", "WIN", or "ATTACK" |
-| `confidence` | Float64 | Detection confidence [0, 1] |
+| `event` | Utf8 | "DEATH", "WIN", or "ATTACK" (wins from key presses) |
+| `confidence` | Float64 | Detection confidence [0, 1] (wins are 1.0 from key presses) |
 
-**Written by:** `reflex_train/weak_labels/precompute.py`
+**Written by:** `reflex_train/weak_labels/precompute.py` (via `precompute_labels.py`)
 **Read by:** `reflex_train/data/dataset.py`
 
 ### episodes.parquet
@@ -84,7 +70,7 @@ Episode boundaries for RL training.
 | `reward` | Float64 | Terminal reward (-1, +1, or 0) |
 | `length` | Int64 | Number of frames in episode |
 
-**Written by:** `reflex_train/weak_labels/precompute.py`
+**Written by:** `reflex_train/weak_labels/precompute.py` (via `precompute_labels.py`)
 **Read by:** `reflex_train/data/dataset.py`
 
 ### returns.parquet
@@ -96,7 +82,7 @@ Per-frame discounted returns for value function training.
 | `frame_idx` | Int64 | Frame index |
 | `return` | Float64 | Discounted return from this frame |
 
-**Written by:** `reflex_train/weak_labels/precompute.py`
+**Written by:** `reflex_train/weak_labels/precompute.py` (via `precompute_labels.py`)
 **Read by:** `reflex_train/data/dataset.py`
 
 ## Generation Pipeline
@@ -105,15 +91,15 @@ Per-frame discounted returns for value function training.
 1. inputctl-record
    └── frames.parquet, inputs.parquet, recording.mp4
 
-2. precompute.py (weak labeling)
+2. precompute_labels.py (weak labeling)
    ├── reads: frames.parquet, inputs.parquet, recording.mp4
-   └── writes: intent.parquet, events.parquet, episodes.parquet, returns.parquet
+   └── writes: events.parquet, episodes.parquet, returns.parquet
 
 3. train.py (training)
    └── reads: all parquet files + recording.mp4
 
 4. inputctl-reflex (inference)
-   └── reads: frames.parquet, intent.parquet (eval mode only)
+   └── reads: frames.parquet
 ```
 
 ## Update Checklist

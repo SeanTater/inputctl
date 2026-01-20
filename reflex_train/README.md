@@ -6,8 +6,8 @@ so the Rust agent package stays lean and the training pipeline can evolve indepe
 ## What it does
 
 - Builds a vision-to-action model for 2D sidescrollers (SuperTux first)
-- Uses weak labeling (offline) to infer high-level intent
-- Trains a reflex policy plus an intent predictor
+- Uses weak labeling (offline) to generate event/episode/return signals
+- Trains a reflex policy with IQL-style weighting and inverse dynamics
 
 ## Layout
 
@@ -15,7 +15,7 @@ so the Rust agent package stays lean and the training pipeline can evolve indepe
 - `reflex_train/models/` model definitions
 - `reflex_train/training/` training loop + metrics + config
 - `reflex_train/weak_labels/` game-specific weak labelers
-- `precompute_intents.py` offline weak labeling step
+- `precompute_labels.py` offline weak labeling step
 - `train_reflex.py` training entrypoint
 
 ## Task Shortcuts (Just)
@@ -66,28 +66,25 @@ cargo build --release -p visionctl --bin visionctl
 This creates `dataset/run_<timestamp>/` folders with:
 
 - `recording.mp4`
-- `frames.jsonl`
-- `inputs.jsonl`
+- `frames.parquet`
+- `inputs.parquet`
 
 ## Precompute weak labels
 
 ```bash
 cd reflex_train
-python precompute_intents.py --data_dir ../dataset/ --labeler supertux
+python precompute_labels.py --data_dir ../dataset/
 ```
 
 Outputs per-session label files:
-- `intent.jsonl` - weak intents (RUN, ATTACK, EVADE, etc.)
-- `events.jsonl` - death/win/attack events detected via template matching
-- `episodes.jsonl` - episode segmentation (spawn to terminal)
-- `returns.jsonl` - discounted returns with attack bonuses
+- `events.parquet` - death/attack via template matching; wins via key presses in `inputs.parquet`
+- `episodes.parquet` - episode segmentation (spawn to terminal)
+- `returns.parquet` - discounted returns with attack bonuses
 
 Key knobs:
 
-- `--intent_horizon 10` (lookahead for intent halo)
 - `--sprite_scale 0.5` (speed vs detail tradeoff)
 - `--sprite_threshold 0.85` (template match confidence)
-- `--intent_stride 1` (scan every Nth frame for intent labeling)
 - `--event_stride 1` (scan every Nth frame for event detection)
 - `--attack_reward 0.1` (bonus for killing enemies)
 - `--death_reward -1.0` / `--win_reward 1.0`
@@ -138,7 +135,7 @@ and how weak labels feed into returns.
 There is a minimal Rust runner in `reflex_infer/`:
 
 ```bash
-cargo run -p reflex_infer -- --model reflex.onnx live --goal-intent RUN
+cargo run -p reflex_infer -- --model reflex.onnx live
 ```
 
 This runs live inference (screenshots + key presses).
@@ -153,7 +150,6 @@ Important settings (via CLI or env vars, prefixed with `REFLEX_TRAIN_`):
 
 - `data_dir`: dataset root (required)
 - `action_horizon`: predict keys this many frames ahead
-- `intent_weight`: weight for intent loss
 - `checkpoint_dir`: save checkpoints and config snapshot
 
 ## Verify dataset (optional)

@@ -3,14 +3,13 @@ import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import polars as pl
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, IterableDataset
 
-from .intent import INTENT_TO_IDX, intent_to_vector
 from .keys import keys_to_vector
 from .logs import load_key_sets
 
@@ -55,7 +54,6 @@ class SessionMeta:
     video_path: str
     frame_indices: list  # List of frame indices from parquet
     _key_state_by_frame: list | None = None
-    _intent_by_frame: list | None = None
     _returns_map: dict | None = None
     _episode_lookup: dict | None = None
     _episode_end_frames: set | None = None
@@ -68,24 +66,6 @@ class SessionMeta:
         _, key_set_by_frame = load_key_sets(frames_log, inputs_log)
         self._key_state_by_frame = [keys_to_vector(keys) for keys in key_set_by_frame]
 
-    def _load_intents(self, intent_labeler=None):
-        if self._intent_by_frame is not None:
-            return
-        intent_log = os.path.join(self.session_dir, "intent.parquet")
-        if os.path.exists(intent_log):
-            df_intent = pl.read_parquet(intent_log)
-            intent_map = {
-                row["frame_idx"]: row["intent"] for row in df_intent.to_dicts()
-            }
-            self._intent_by_frame = [
-                intent_map.get(idx, "WAIT") for idx in self.frame_indices
-            ]
-        elif intent_labeler is not None:
-            self._intent_by_frame = intent_labeler.label_intents(
-                self.video_path, self.frame_indices, self.key_set_by_frame
-            )
-        else:
-            self._intent_by_frame = ["WAIT"] * len(self.frame_indices)
 
     def _load_returns(self):
         if self._returns_map is not None:
@@ -115,10 +95,6 @@ class SessionMeta:
         self._load_keys()
         return self._key_state_by_frame[frame_idx_in_session]
 
-    def get_intent(self, frame_idx_in_session: int, intent_labeler=None) -> str:
-        self._load_intents(intent_labeler)
-        intent = self._intent_by_frame[frame_idx_in_session]
-        return intent if intent is not None else "WAIT"
 
     def get_return(self, frame_idx: int) -> float:
         self._load_returns()
@@ -203,22 +179,12 @@ class MultiStreamDataset(Dataset):
         run_dirs: List[str],
         transform=None,
         context_frames: int = 3,
-        goal_intent: Optional[str] = None,
         action_horizon: int = 0,
-        intent_labeler=None,
         chunk_size: int = 500,
     ):
         self.transform = transform
         self.context_frames = context_frames
-        self.fixed_goal = None
-        self.fixed_intent = None
-        if goal_intent is not None:
-            self.fixed_intent = goal_intent
-            self.fixed_goal = torch.tensor(
-                intent_to_vector(goal_intent), dtype=torch.float32
-            )
         self.action_horizon = action_horizon
-        self.intent_labeler = intent_labeler
         self.chunk_size = chunk_size
 
         # Lazy-loaded session metadata (shared across workers via CoW)
@@ -426,14 +392,6 @@ class MultiStreamDataset(Dataset):
         if current_keys is None:
             current_keys = keys_to_vector(set())
 
-        if self.fixed_goal is not None:
-            intent = self.fixed_intent
-            goal_vec = self.fixed_goal
-        else:
-            intent = session.get_intent(frame_i, self.intent_labeler)
-            goal_vec = torch.tensor(intent_to_vector(intent), dtype=torch.float32)
-
-        label_intent = torch.tensor(INTENT_TO_IDX[intent], dtype=torch.long)
         label_mouse = torch.tensor([0.5, 0.5])
 
         # RL fields (IQL always enabled, always load returns)
@@ -442,10 +400,8 @@ class MultiStreamDataset(Dataset):
 
         return {
             "pixels": input_stack,
-            "goal": goal_vec,
             "label_keys": label_keys,
             "label_mouse": label_mouse,
-            "label_intent": label_intent,
             "next_pixels": next_frame_tensor,
             "current_keys": current_keys,
             # RL fields

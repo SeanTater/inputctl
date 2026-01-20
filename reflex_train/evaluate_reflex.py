@@ -20,13 +20,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from torch.utils.data import DataLoader, Subset
 
 from reflex_train.data.dataset import MultiStreamDataset
-from reflex_train.data.intent import INTENTS
 from reflex_train.data.keys import NUM_KEYS
 from reflex_train.models.reflex_net import ReflexNet
 from reflex_train.training.evaluate import (
-    EvalAccumulator,
     evaluate_model,
-    load_checkpoint,
     results_to_dict,
 )
 from reflex_train.training.report import generate_html_report
@@ -97,9 +94,7 @@ def main():
         run_dirs=run_dirs,
         context_frames=context_frames,
         transform=None,
-        goal_intent=None,
         action_horizon=train_cfg.get("action_horizon", 2),
-        intent_labeler=None,
     )
 
     # Deterministic test split: last N% of samples
@@ -128,7 +123,6 @@ def main():
 
     model = ReflexNet(
         context_frames=context_frames,
-        goal_dim=len(INTENTS),
         num_keys=NUM_KEYS,
         inv_dynamics=inv_dyn_enabled,
     ).to(device)
@@ -173,12 +167,6 @@ def main():
     print(f"  Recall:       {results.keys.recall_micro:.4f}")
     print()
 
-    print("Intent Head (Multi-Class):")
-    print(f"  Accuracy:     {results.intent.accuracy:.4f}")
-    print(f"  F1 Macro:     {results.intent.f1_macro:.4f}")
-    print(f"  F1 Weighted:  {results.intent.f1_weighted:.4f}")
-    print()
-
     print("Value Head (Regression):")
     print(f"  MSE:          {results.value.mse:.6f}")
     print(f"  MAE:          {results.value.mae:.6f}")
@@ -192,14 +180,6 @@ def main():
         print(f"  F1 Macro:     {results.inv_dyn.f1_macro:.4f}")
         print(f"  Exact Match:  {results.inv_dyn.exact_match_accuracy:.4f}")
         print()
-
-    # Intent confusion matrix preview
-    print("Intent Confusion (Top Diagonal Values):")
-    for i, intent in enumerate(INTENTS):
-        val = results.intent.confusion_matrix_normalized[i, i]
-        support = results.intent.per_class[intent]["support"]
-        print(f"  {intent:8s}: {val:.2f} (n={support})")
-    print()
 
     # Top/bottom keys
     per_key = results.keys.per_key

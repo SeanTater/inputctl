@@ -1,25 +1,40 @@
-"""Event detection for death/win/attack in SuperTux gameplay videos."""
+"""Event detection for death/attack in SuperTux gameplay videos.
+
+Win events are sourced from manual key presses in inputs logs.
+"""
 
 from __future__ import annotations
 
-import base64
-import io
-import json
+import bisect
 import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Iterator
 
-from PIL import Image
+import polars as pl
 
 from .gpu_matching import GPUTemplateMatcher, GPUVideoScanner
 
 # Keywords indicating an enemy has been attacked/killed
 ATTACKED_KEYWORDS = (
-    "stomp", "stomped", "flat", "flatten", "melting", "dead", "die",
-    "squash", "squished", "hurt", "hit", "kill", "killed", "crush",
-    "burn", "explode", "boom",
+    "stomp",
+    "stomped",
+    "flat",
+    "flatten",
+    "melting",
+    "dead",
+    "die",
+    "squash",
+    "squished",
+    "squish",
+    "hurt",
+    "hit",
+    "kill",
+    "killed",
+    "crush",
+    "burn",
+    "explode",
+    "boom",
+    "shatter",
 )
 
 
@@ -33,10 +48,9 @@ class Event:
 
 
 class EventDetector:
-    """Detects death/win/attack events in SuperTux gameplay videos.
+    """Detects death/attack events in SuperTux gameplay videos.
 
     Death: Template matches gameover sprites (tux falling/dying)
-    Win: Sparkle particles near Tux (goal completion)
     Attack: Attacked/squashed enemy sprites detected
     """
 
@@ -45,61 +59,48 @@ class EventDetector:
         base_dir: str = "/usr/share/games/supertux2/images",
         sprite_scale: float = 0.5,
         death_threshold: float = 0.75,
-        attack_threshold: float = 0.8,
-        win_proximity_px: float = 96.0,
-        sparkle_threshold: float = 0.8,
-        win_min_frames: int = 3,
+        attack_threshold: float = 0.75,
+        win_key: str = "KEY_BACKSLASH",
+        win_key_min_presses: int = 1,
+        win_key_window_s: float = 2.0,
+        win_key_cooldown_s: float = 30.0,
         frame_stride: int = 1,
-        win_llm_gate: bool = False,
-        win_llm_sample_stride: int = 30,
-        win_llm_prompt: str = (
-            "Is this the SuperTux level-complete or win screen? Reply YES or NO."
-        ),
-        win_llm_timeout_s: float = 30.0,
-        win_llm_model: str = "qwen3-vl:4b",
-        win_llm_url: str = "http://localhost:11434/api/generate",
+        blank_frame_mean_threshold: float | None = 40.0,
+        blank_frame_std_threshold: float | None = 10.0,
+        attack_min_gap: int = 1,  # one per frame
+        death_min_gap: int = 30 * 5,  # five seconds
     ):
         self.base_dir = base_dir
         self.sprite_scale = sprite_scale
         self.death_threshold = death_threshold
         self.attack_threshold = attack_threshold
-        self.win_proximity_px = win_proximity_px
-        self.sparkle_threshold = sparkle_threshold
-        self.win_min_frames = win_min_frames
+        self.win_key = win_key
+        self.win_key_min_presses = max(1, win_key_min_presses)
+        self.win_key_window_s = max(0.01, win_key_window_s)
+        self.win_key_cooldown_s = max(0.0, win_key_cooldown_s)
         self.frame_stride = frame_stride
-        self.win_llm_gate = win_llm_gate
-        self.win_llm_sample_stride = max(1, win_llm_sample_stride)
-        self.win_llm_prompt = win_llm_prompt
-        self.win_llm_timeout_s = win_llm_timeout_s
-        self.win_llm_model = win_llm_model
-        self.win_llm_url = win_llm_url
+        self.attack_min_gap = attack_min_gap
+        self.death_min_gap = death_min_gap
 
         # GPU matching setup
         self._matcher = GPUTemplateMatcher()
         self._scanner = GPUVideoScanner(
             matcher=self._matcher,
             sprite_scale=sprite_scale,
+            blank_frame_mean_threshold=blank_frame_mean_threshold,
+            blank_frame_std_threshold=blank_frame_std_threshold,
         )
 
         # Load templates
         self.death_templates = self._matcher.load_templates(
             self._find_death_sprites(), scale=sprite_scale
         )
-        self.tux_templates = self._matcher.load_templates(
-            self._find_tux_sprites(), scale=sprite_scale
-        )
         self.attacked_templates = self._matcher.load_templates(
             self._find_attacked_sprites(), scale=sprite_scale
         )
-        sparkle_templates = self._matcher.load_templates(
-            self._find_sparkle_sprites(), scale=sprite_scale
-        )
-        self.sparkle_templates = self._filter_sparkle_templates(sparkle_templates)
 
         if not self.death_templates:
             print(f"Warning: No death templates found in {base_dir}")
-        if not self.sparkle_templates:
-            print(f"Warning: No sparkle templates found in {base_dir}")
         if not self.attacked_templates:
             print(f"Warning: No attacked enemy templates found in {base_dir}")
 
@@ -115,10 +116,6 @@ class EventDetector:
                     death_paths.append(os.path.join(root, fname))
         return death_paths
 
-    def _find_tux_sprites(self) -> list[str]:
-        tux_dir = os.path.join(self.base_dir, "creatures", "tux")
-        return self._collect_pngs(tux_dir)
-
     def _find_attacked_sprites(self) -> list[str]:
         """Find sprites of attacked/squashed enemies."""
         creatures_dir = os.path.join(self.base_dir, "creatures")
@@ -127,7 +124,9 @@ class EventDetector:
             return attacked_paths
         for root, _, files in os.walk(creatures_dir):
             # Skip tux/penny directories
-            if "tux" in root or "penny" in root:
+            rel_root = os.path.relpath(root, creatures_dir)
+            top_dir = rel_root.split(os.sep, 1)[0]
+            if top_dir in {"tux", "penny"}:
                 continue
             for fname in files:
                 if not fname.lower().endswith(".png"):
@@ -137,49 +136,21 @@ class EventDetector:
                     attacked_paths.append(os.path.join(root, fname))
         return attacked_paths
 
-    def _find_sparkle_sprites(self) -> list[str]:
-        particles_dir = os.path.join(self.base_dir, "particles")
-        return self._collect_pngs(particles_dir, prefix="sparkle")
-
-    def _collect_pngs(self, root: str, prefix: str | None = None) -> list[str]:
-        pngs: list[str] = []
-        if not os.path.isdir(root):
-            return pngs
-        for dirpath, _, filenames in os.walk(root):
-            for name in filenames:
-                if not name.lower().endswith(".png"):
-                    continue
-                if prefix and not name.lower().startswith(prefix):
-                    continue
-                pngs.append(os.path.join(dirpath, name))
-        return pngs
-
-    def _filter_sparkle_templates(self, templates: list[tuple]) -> list[tuple]:
-        """Filter to prefer 'light' sparkle templates."""
-        filtered = [t for t in templates if "light" in os.path.basename(t[1]).lower()]
-        return filtered or templates
 
     def detect_events(
-        self, video_path: str, show_progress: bool = True
+        self, video_path: str, inputs_log: str | None = None, show_progress: bool = True
     ) -> list[Event] | None:
-        """Scan a video and detect all death/win/attack events.
-
-        Returns events sorted by frame index, or None if video is corrupted.
-        """
+        """Scan a video and detect all death/attack events, plus win key markers."""
         try:
             frame_results = self._scanner.detect_events(
                 video_path,
-            self.tux_templates,
-            self.death_templates,
-            self.attacked_templates,
-            self.sparkle_templates,
-            self.death_threshold,
-            self.attack_threshold,
-            self.sparkle_threshold,
-            self.win_proximity_px,
-            frame_stride=self.frame_stride,
-            show_progress=show_progress,
-        )
+                self.death_templates,
+                self.attacked_templates,
+                self.death_threshold,
+                self.attack_threshold,
+                frame_stride=self.frame_stride,
+                show_progress=show_progress,
+            )
         except Exception as e:
             print(f"Warning: Cannot process video {video_path}: {e}")
             return None
@@ -187,18 +158,18 @@ class EventDetector:
         if not frame_results:
             return []
 
+        key_press_events = []
+        if inputs_log:
+            key_press_events = self._load_win_key_presses(inputs_log)
+
         # Convert per-frame results to events
         events = []
         in_death = False
         in_attack = False
-        win_streak = 0
-        win_streak_start = None
-        last_win_conf = 0.0
 
         for frame_idx, result in enumerate(frame_results):
             death_conf = result["death_conf"]
             attack_conf = result["attack_conf"]
-            win_conf = result["win_conf"]
 
             # Death detection with debouncing
             if death_conf >= self.death_threshold:
@@ -216,129 +187,121 @@ class EventDetector:
             else:
                 in_attack = False
 
-            # Win detection with streak requirement
-            if win_conf > 0:
-                if win_streak == 0:
-                    win_streak_start = frame_idx
-                win_streak += 1
-                last_win_conf = win_conf
-            else:
-                if win_streak >= self.win_min_frames and win_streak_start is not None:
-                    events.append(Event(win_streak_start, "WIN", last_win_conf))
-                win_streak = 0
-                win_streak_start = None
-
-        # Handle win streak at end of video
-        if win_streak >= self.win_min_frames and win_streak_start is not None:
-            events.append(Event(win_streak_start, "WIN", last_win_conf))
-
-        if self.win_llm_gate:
-            events = self._gate_win_events(video_path, events)
+        if key_press_events:
+            events.extend(self._win_events_from_key_presses(key_press_events))
+        elif inputs_log:
+            print(f"Warning: no win key presses found in {inputs_log}")
+        elif show_progress:
+            print("Warning: inputs.parquet missing; win key labels disabled")
 
         # Sort by frame index and deduplicate nearby events
         events.sort(key=lambda e: e.frame_idx)
         return self._deduplicate_events(events)
 
-    def _gate_win_events(self, video_path: str, events: list[Event]) -> list[Event]:
-        """Use LLM to validate win events."""
-        if not events:
-            return events
-        if not self._ollama_available():
-            print("Warning: Ollama not available; skipping win gating")
-            return events
+    def _load_win_key_presses(self, inputs_log: str) -> list[dict]:
+        if not os.path.exists(inputs_log):
+            print(f"Warning: inputs log missing for win keys: {inputs_log}")
+            return []
 
-        from reflex_train.data.dataset import _get_torchcodec_decoders, _ensure_nchw_frames
-
-        try:
-            VideoDecoder, _ = _get_torchcodec_decoders()
-            decoder = VideoDecoder(video_path, device="cpu")
-        except Exception as e:
-            print(f"Warning: Cannot open video for gating: {e}")
-            return events
-
-        gated: list[Event] = []
-        for event in events:
-            if event.event != "WIN":
-                gated.append(event)
-                continue
-            if self._confirm_win_event(decoder, event.frame_idx):
-                gated.append(event)
-
-        return gated
-
-    def _confirm_win_event(self, decoder, frame_idx: int) -> bool:
-        """Confirm win event using LLM."""
-        from reflex_train.data.dataset import _ensure_nchw_frames
-
-        for offset in range(0, self.win_min_frames, self.win_llm_sample_stride):
-            sample_idx = frame_idx + offset
-            try:
-                frame_data = decoder.get_frame_at(sample_idx)
-                frame = _ensure_nchw_frames(frame_data.data)
-                frame_np = frame[0].permute(1, 2, 0).cpu().numpy().astype("uint8")
-                if self._ollama_is_win(frame_np):
-                    return True
-            except Exception:
-                continue
-        return False
-
-    def _ollama_is_win(self, frame_np) -> bool:
-        """Query Ollama to check if frame shows win screen."""
-        img = Image.fromarray(frame_np)
-        buffer = io.BytesIO()
-        img.save(buffer, format="JPEG")
-        jpg_bytes = buffer.getvalue()
-
-        payload = {
-            "model": self.win_llm_model,
-            "prompt": self.win_llm_prompt,
-            "images": [base64.b64encode(jpg_bytes).decode("utf-8")],
-            "stream": False,
-        }
-        try:
-            response = self._ollama_request(payload)
-        except Exception as exc:
-            print(f"Warning: Ollama request failed: {exc}")
-            return False
-
-        text = response.get("response", "")
-        return text.strip().lower().startswith("yes")
-
-    def _ollama_request(self, payload: dict) -> dict:
-        """Send request to Ollama HTTP API."""
-        timeout = max(1.0, float(self.win_llm_timeout_s))
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self.win_llm_url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        df_inputs = pl.read_parquet(inputs_log)
+        if df_inputs.is_empty():
+            return []
+        key_variants = [self.win_key, f"Key({self.win_key})"]
+        df_keys = (
+            df_inputs.filter(pl.col("event_type") == "key")
+            .filter(pl.col("key_name").is_in(key_variants))
+            .sort("timestamp")
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8")
-        return json.loads(body)
+        if df_keys.is_empty():
+            return []
 
-    def _ollama_available(self) -> bool:
-        """Check if Ollama API is reachable."""
-        try:
-            # Check the /api/tags endpoint (lightweight)
-            base_url = self.win_llm_url.rsplit("/", 1)[0]
-            req = urllib.request.Request(f"{base_url}/tags", method="GET")
-            with urllib.request.urlopen(req, timeout=1.0):
-                return True
-        except Exception:
-            return False
+        key_events = df_keys.select(["timestamp", "state"]).to_dicts()
+        frame_indices, frame_timestamps = self._load_frame_times_for_inputs(inputs_log)
+        if not frame_indices:
+            return []
 
-    def _deduplicate_events(
-        self, events: list[Event], min_gap: int = 30
-    ) -> list[Event]:
+        press_events = []
+        for evt in key_events:
+            state = evt.get("state")
+            if state in {"down", "repeat"}:
+                press_events.append(evt)
+
+        if not press_events:
+            return []
+
+        press_times = [evt["timestamp"] for evt in press_events]
+        press_frames = self._map_timestamps_to_frames(press_times, frame_indices, frame_timestamps)
+        return [
+            {"timestamp": press_events[i]["timestamp"], "frame_idx": press_frames[i]}
+            for i in range(len(press_frames))
+        ]
+
+    def _load_frame_times_for_inputs(self, inputs_log: str) -> tuple[list[int], list[int]]:
+        run_dir = os.path.dirname(inputs_log)
+        frames_log = os.path.join(run_dir, "frames.parquet")
+        if not os.path.exists(frames_log):
+            return [], []
+
+        df_frames = pl.read_parquet(frames_log)
+        frame_indices = df_frames["frame_idx"].to_list()
+        frame_timestamps = df_frames["timestamp"].to_list()
+        return frame_indices, frame_timestamps
+
+    @staticmethod
+    def _map_timestamps_to_frames(
+        press_times: list[int], frame_indices: list[int], frame_timestamps: list[int]
+    ) -> list[int]:
+        press_frames = []
+        for ts in press_times:
+            pos = bisect.bisect_right(frame_timestamps, ts) - 1
+            if pos < 0:
+                pos = 0
+            if pos < len(frame_indices):
+                press_frames.append(frame_indices[pos])
+        return press_frames
+
+    def _win_events_from_key_presses(self, press_events: list[dict]) -> list[Event]:
+        if not press_events:
+            return []
+        press_events = sorted(press_events, key=lambda e: e["timestamp"])
+        events: list[Event] = []
+        cooldown_ms = int(self.win_key_cooldown_s * 1000)
+        window_ms = max(1, int(self.win_key_window_s * 1000))
+        last_win_ts = None
+        i = 0
+        while i < len(press_events):
+            start_ts = press_events[i]["timestamp"]
+            window_end = start_ts + window_ms
+            j = i
+            count = 0
+            first_frame = press_events[i]["frame_idx"]
+            while j < len(press_events) and press_events[j]["timestamp"] <= window_end:
+                count += 1
+                j += 1
+            if count >= self.win_key_min_presses:
+                if last_win_ts is None or start_ts - last_win_ts >= cooldown_ms:
+                    events.append(Event(first_frame, "WIN", 1.0))
+                    last_win_ts = start_ts
+                i = j
+            else:
+                i += 1
+        return events
+
+    def _deduplicate_events(self, events: list[Event]) -> list[Event]:
         """Remove duplicate events that are too close together."""
         if not events:
             return events
 
         deduped = [events[0]]
+        win_min_gap = int(self.win_key_cooldown_s * 30)
         for event in events[1:]:
             prev = deduped[-1]
+            if event.event == "ATTACK":
+                min_gap = self.attack_min_gap
+            elif event.event == "WIN":
+                min_gap = win_min_gap
+            else:
+                min_gap = self.death_min_gap
             if (
                 event.event == prev.event
                 and (event.frame_idx - prev.frame_idx) < min_gap

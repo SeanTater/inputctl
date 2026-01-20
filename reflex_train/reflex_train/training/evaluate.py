@@ -6,7 +6,6 @@ from typing import Optional
 import numpy as np
 import torch
 from sklearn.metrics import (
-    confusion_matrix,
     f1_score,
     precision_recall_fscore_support,
     precision_score,
@@ -16,7 +15,6 @@ from scipy.stats import pearsonr, spearmanr
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ..data.intent import INTENTS
 from ..data.keys import IDX_TO_KEY, NUM_KEYS
 from ..models.reflex_net import ReflexNet
 
@@ -36,21 +34,6 @@ class KeyMetrics:
     # Aggregated counts
     total_samples: int = 0
     total_positives: int = 0
-
-
-@dataclass
-class IntentMetrics:
-    """Multi-class intent classification metrics."""
-
-    accuracy: float = 0.0
-    f1_macro: float = 0.0
-    f1_weighted: float = 0.0
-    confusion_matrix: np.ndarray = field(default_factory=lambda: np.zeros((7, 7)))
-    confusion_matrix_normalized: np.ndarray = field(
-        default_factory=lambda: np.zeros((7, 7))
-    )
-    per_class: dict = field(default_factory=dict)
-    total_samples: int = 0
 
 
 @dataclass
@@ -82,9 +65,6 @@ class TemporalMetrics:
 
     key_chatter_rate: float = 0.0  # Flip-flops per frame pair
     key_chatter_per_key: dict = field(default_factory=dict)  # {key_name: rate}
-    intent_mean_run_pred: float = 0.0  # Mean consecutive same predictions
-    intent_mean_run_gt: float = 0.0  # Mean consecutive same ground truth
-    intent_stability_ratio: float = 0.0  # pred_run / gt_run
 
 
 @dataclass
@@ -100,7 +80,6 @@ class CalibrationMetrics:
 class ConditionalMetrics:
     """Conditional performance metrics stratified by various factors."""
 
-    key_f1_by_intent: dict = field(default_factory=dict)  # {intent: f1}
     key_f1_by_rarity: dict = field(default_factory=dict)  # {bucket: f1}
     f1_near_episode_boundary: float = 0.0
     f1_away_from_boundary: float = 0.0
@@ -111,7 +90,6 @@ class EvaluationResults:
     """Complete evaluation results."""
 
     keys: KeyMetrics
-    intent: IntentMetrics
     value: ValueMetrics
     inv_dyn: Optional[InvDynMetrics]
     temporal: Optional[TemporalMetrics] = None
@@ -131,8 +109,6 @@ class EvalAccumulator:
         self.key_preds = []
         self.key_targets = []
         self.key_probs = []  # Raw probabilities for calibration
-        self.intent_preds = []
-        self.intent_targets = []
         self.value_preds = []
         self.value_targets = []
         self.inv_dyn_preds = []
@@ -146,8 +122,6 @@ class EvalAccumulator:
         self,
         key_logits: torch.Tensor,
         key_targets: torch.Tensor,
-        intent_logits: torch.Tensor,
-        intent_targets: torch.Tensor,
         value_preds: torch.Tensor,
         value_targets: torch.Tensor,
         inv_dyn_logits: Optional[torch.Tensor] = None,
@@ -163,11 +137,6 @@ class EvalAccumulator:
         self.key_preds.append(key_binary)
         self.key_targets.append((key_targets > 0.5).cpu().numpy())
         self.key_probs.append(key_probs_tensor.cpu().numpy())
-
-        # Intent: argmax
-        intent_pred = torch.argmax(intent_logits, dim=1).cpu().numpy()
-        self.intent_preds.append(intent_pred)
-        self.intent_targets.append(intent_targets.cpu().numpy())
 
         # Value
         self.value_preds.append(value_preds.cpu().numpy())
@@ -192,7 +161,6 @@ class EvalAccumulator:
     def compute_metrics(self) -> EvaluationResults:
         """Compute all metrics from accumulated predictions."""
         keys = self._compute_key_metrics()
-        intent = self._compute_intent_metrics()
         value = self._compute_value_metrics()
         inv_dyn = self._compute_inv_dyn_metrics() if self.has_inv_dyn else None
         temporal = self._compute_temporal_metrics()
@@ -201,7 +169,6 @@ class EvalAccumulator:
 
         return EvaluationResults(
             keys=keys,
-            intent=intent,
             value=value,
             inv_dyn=inv_dyn,
             temporal=temporal,
@@ -257,46 +224,6 @@ class EvalAccumulator:
 
         return metrics
 
-    def _compute_intent_metrics(self) -> IntentMetrics:
-        y_pred = np.concatenate(self.intent_preds)
-        y_true = np.concatenate(self.intent_targets)
-
-        metrics = IntentMetrics()
-        metrics.total_samples = len(y_true)
-
-        # Accuracy
-        metrics.accuracy = float((y_pred == y_true).mean())
-
-        # F1 scores
-        metrics.f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
-        metrics.f1_weighted = f1_score(
-            y_true, y_pred, average="weighted", zero_division=0
-        )
-
-        # Confusion matrix
-        cm = confusion_matrix(y_true, y_pred, labels=list(range(len(INTENTS))))
-        metrics.confusion_matrix = cm
-
-        # Row-normalized confusion matrix
-        row_sums = cm.sum(axis=1, keepdims=True)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            cm_norm = np.where(row_sums > 0, cm / row_sums, 0)
-        metrics.confusion_matrix_normalized = cm_norm
-
-        # Per-class metrics
-        precision, recall, f1, support = precision_recall_fscore_support(
-            y_true, y_pred, labels=list(range(len(INTENTS))), zero_division=0
-        )
-        for i, intent_name in enumerate(INTENTS):
-            metrics.per_class[intent_name] = {
-                "precision": float(precision[i]),
-                "recall": float(recall[i]),
-                "f1": float(f1[i]),
-                "support": int(support[i]),
-            }
-
-        return metrics
-
     def _compute_value_metrics(self) -> ValueMetrics:
         y_pred = np.concatenate(self.value_preds)
         y_true = np.concatenate(self.value_targets)
@@ -349,8 +276,6 @@ class EvalAccumulator:
         sample_arr = np.concatenate(self.sample_indices)
         key_preds = np.vstack(self.key_preds)
         key_targets = np.vstack(self.key_targets)
-        intent_preds = np.concatenate(self.intent_preds)
-        intent_targets = np.concatenate(self.intent_targets)
 
         # Sort by (session, sample) to ensure temporal ordering
         order = np.lexsort((sample_arr, session_arr))
@@ -358,8 +283,6 @@ class EvalAccumulator:
         sample_arr = sample_arr[order]
         key_preds = key_preds[order]
         key_targets = key_targets[order]
-        intent_preds = intent_preds[order]
-        intent_targets = intent_targets[order]
 
         metrics = TemporalMetrics()
         num_keys = key_preds.shape[1]
@@ -388,29 +311,6 @@ class EvalAccumulator:
                     metrics.key_chatter_per_key[key_name] = float(
                         per_key_flips[key_idx] / per_key_pairs[key_idx]
                     )
-
-        # Compute intent run lengths
-        def compute_run_lengths(arr, sessions):
-            runs = []
-            current_run = 1
-            for i in range(1, len(arr)):
-                if sessions[i] == sessions[i - 1] and arr[i] == arr[i - 1]:
-                    current_run += 1
-                else:
-                    runs.append(current_run)
-                    current_run = 1
-            runs.append(current_run)
-            return runs
-
-        pred_runs = compute_run_lengths(intent_preds, session_arr)
-        gt_runs = compute_run_lengths(intent_targets, session_arr)
-
-        metrics.intent_mean_run_pred = float(np.mean(pred_runs)) if pred_runs else 0.0
-        metrics.intent_mean_run_gt = float(np.mean(gt_runs)) if gt_runs else 0.0
-        if metrics.intent_mean_run_gt > 0:
-            metrics.intent_stability_ratio = (
-                metrics.intent_mean_run_pred / metrics.intent_mean_run_gt
-            )
 
         return metrics
 
@@ -495,21 +395,10 @@ class EvalAccumulator:
         """Compute conditional performance metrics."""
         key_preds = np.vstack(self.key_preds)
         key_targets = np.vstack(self.key_targets)
-        intent_targets = np.concatenate(self.intent_targets)
 
         metrics = ConditionalMetrics()
 
-        # 1. Key F1 stratified by ground truth intent
-        for intent_idx, intent_name in enumerate(INTENTS):
-            mask = intent_targets == intent_idx
-            if mask.sum() < 10:
-                continue
-            f1 = f1_score(
-                key_targets[mask], key_preds[mask], average="micro", zero_division=0
-            )
-            metrics.key_f1_by_intent[intent_name] = float(f1)
-
-        # 2. Key F1 by rarity buckets
+        # Key F1 by rarity buckets
         # Categorize keys: rare (<1%), medium (1-10%), common (>10%)
         total_samples = key_targets.shape[0]
         rare_mask = np.zeros(key_targets.shape[1], dtype=bool)
@@ -544,7 +433,7 @@ class EvalAccumulator:
             f1 = f1_score(bucket_targets, bucket_preds, average="micro", zero_division=0)
             metrics.key_f1_by_rarity[bucket_name] = float(f1)
 
-        # 3. Episode boundary performance
+        # Episode boundary performance
         if self.done_flags and self.session_indices and self.sample_indices:
             done_arr = np.concatenate(self.done_flags)
             session_arr = np.concatenate(self.session_indices)
@@ -593,7 +482,6 @@ def load_checkpoint(checkpoint_path: str, device: torch.device, cfg: dict) -> Re
     """Load a model checkpoint."""
     model = ReflexNet(
         context_frames=cfg.get("context_frames", 3),
-        goal_dim=len(INTENTS),
         num_keys=NUM_KEYS,
         inv_dynamics=cfg.get("inv_dyn_enabled", True),
     ).to(device)
@@ -622,9 +510,7 @@ def evaluate_model(
     with torch.no_grad():
         for batch in progress:
             pixels = batch["pixels"].to(device, non_blocking=True)
-            goals = batch["goal"].to(device, non_blocking=True)
             target_keys = batch["label_keys"].to(device, non_blocking=True)
-            target_intent = batch["label_intent"].to(device, non_blocking=True)
             target_returns = batch["return"].to(device, non_blocking=True)
             next_pixels = batch["next_pixels"].to(device, non_blocking=True)
             current_keys = batch["current_keys"].to(device, non_blocking=True)
@@ -634,9 +520,7 @@ def evaluate_model(
             sample_idx = batch.get("sample_idx")
             done = batch.get("done")
 
-            keys_logit, _, inv_dyn_logits, intent_logits, value = model(
-                pixels, goals, next_pixels
-            )
+            keys_logit, _, inv_dyn_logits, value = model(pixels, next_pixels)
 
             # Use current_keys as inv_dyn target (keys held during frame transition)
             inv_dyn_target = current_keys if has_inv_dyn else None
@@ -644,8 +528,6 @@ def evaluate_model(
             accumulator.update(
                 key_logits=keys_logit,
                 key_targets=target_keys,
-                intent_logits=intent_logits,
-                intent_targets=target_intent,
                 value_preds=value,
                 value_targets=target_returns,
                 inv_dyn_logits=inv_dyn_logits,
@@ -674,16 +556,6 @@ def results_to_dict(results: EvaluationResults) -> dict:
             "total_positives": results.keys.total_positives,
             "per_key": results.keys.per_key,
         },
-        "intent": {
-            "accuracy": results.intent.accuracy,
-            "f1_macro": results.intent.f1_macro,
-            "f1_weighted": results.intent.f1_weighted,
-            "confusion_matrix": results.intent.confusion_matrix.tolist(),
-            "confusion_matrix_normalized": results.intent.confusion_matrix_normalized.tolist(),
-            "per_class": results.intent.per_class,
-            "total_samples": results.intent.total_samples,
-            "intents": INTENTS,
-        },
         "value": {
             "mse": results.value.mse,
             "mae": results.value.mae,
@@ -708,9 +580,6 @@ def results_to_dict(results: EvaluationResults) -> dict:
         out["temporal"] = {
             "key_chatter_rate": results.temporal.key_chatter_rate,
             "key_chatter_per_key": results.temporal.key_chatter_per_key,
-            "intent_mean_run_pred": results.temporal.intent_mean_run_pred,
-            "intent_mean_run_gt": results.temporal.intent_mean_run_gt,
-            "intent_stability_ratio": results.temporal.intent_stability_ratio,
         }
 
     if results.calibration is not None:
@@ -730,7 +599,6 @@ def results_to_dict(results: EvaluationResults) -> dict:
 
     if results.conditional is not None:
         out["conditional"] = {
-            "key_f1_by_intent": results.conditional.key_f1_by_intent,
             "key_f1_by_rarity": results.conditional.key_f1_by_rarity,
             "f1_near_episode_boundary": results.conditional.f1_near_episode_boundary,
             "f1_away_from_boundary": results.conditional.f1_away_from_boundary,

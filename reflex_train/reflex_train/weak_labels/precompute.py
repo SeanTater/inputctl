@@ -1,8 +1,7 @@
 import os
 
 import polars as pl
-from reflex_train.data.logs import load_key_sets, load_frame_logs
-from reflex_train.weak_labels import KeyWindowIntentLabeler, SuperTuxIntentLabeler
+from reflex_train.data.logs import load_frame_logs
 from .config import LabelingConfig
 from .events import EventDetector
 from .episodes import segment_episodes, compute_returns
@@ -16,17 +15,6 @@ def find_run_dirs(data_dir):
         for d in os.listdir(data_dir)
         if os.path.isdir(os.path.join(data_dir, d))
     ]
-
-
-def write_intents(path, frame_indices, frame_timestamps, intents, overwrite=False):
-    if os.path.exists(path) and not overwrite:
-        return False
-    data = {"frame_idx": frame_indices, "intent": intents}
-    if frame_timestamps:
-        data["timestamp"] = frame_timestamps
-    df = pl.DataFrame(data)
-    df.write_parquet(path)
-    return True
 
 
 def write_events(path, events, overwrite=False):
@@ -70,21 +58,6 @@ def precompute(cfg: LabelingConfig):
         print("No run directories found.")
         return
 
-    # Intent labeler
-    if cfg.labeler == "supertux":
-        labeler = SuperTuxIntentLabeler(
-            base_dir=cfg.base_dir,
-            intent_horizon=cfg.intent_horizon,
-            sprite_scale=cfg.sprite_scale,
-            sprite_threshold=cfg.sprite_threshold,
-            proximity_px=cfg.sprite_proximity,
-            frame_stride=cfg.intent_stride,
-        )
-    elif cfg.labeler == "keys":
-        labeler = KeyWindowIntentLabeler(intent_horizon=cfg.intent_horizon)
-    else:
-        raise ValueError("labeler must be 'supertux' or 'keys'")
-
     # Event detector for RL
     event_detector = None
     if cfg.detect_events:
@@ -92,43 +65,28 @@ def precompute(cfg: LabelingConfig):
             base_dir=cfg.base_dir,
             sprite_scale=cfg.sprite_scale,
             death_threshold=cfg.death_threshold,
-            win_proximity_px=cfg.win_proximity_px,
-            sparkle_threshold=cfg.sparkle_threshold,
-            win_min_frames=cfg.win_min_frames,
+            attack_threshold=cfg.attack_threshold,
+            win_key=cfg.win_key,
+            win_key_min_presses=cfg.win_key_min_presses,
+            win_key_window_s=cfg.win_key_window_s,
+            win_key_cooldown_s=cfg.win_key_cooldown_s,
             frame_stride=cfg.event_stride,
-            win_llm_gate=cfg.win_llm_gate,
-            win_llm_sample_stride=cfg.win_llm_sample_stride,
-            win_llm_prompt=cfg.win_llm_prompt,
-            win_llm_timeout_s=cfg.win_llm_timeout_s,
-            win_llm_model=cfg.win_llm_model,
-            win_llm_url=cfg.win_llm_url,
+            blank_frame_mean_threshold=cfg.blank_frame_mean_threshold,
+            blank_frame_std_threshold=cfg.blank_frame_std_threshold,
+            attack_min_gap=cfg.attack_min_gap,
+            death_min_gap=cfg.death_min_gap,
         )
 
     for i, run_dir in enumerate(run_dirs):
         print(f"\n[{i + 1}/{len(run_dirs)}] Processing {os.path.basename(run_dir)}")
         frames_log = os.path.join(run_dir, "frames.parquet")
-        inputs_log = os.path.join(run_dir, "inputs.parquet")
         video_path = os.path.join(run_dir, "recording.mp4")
         if not os.path.exists(frames_log) or not os.path.exists(video_path):
             continue
 
-        frame_indices, frame_timestamps = load_frame_logs(frames_log)
-        _, key_sets = load_key_sets(frames_log, inputs_log)
-        if not frame_indices or not key_sets:
+        frame_indices, _frame_timestamps = load_frame_logs(frames_log)
+        if not frame_indices:
             continue
-
-        # Write intent labels
-        intents = labeler.label_intents(video_path, frame_indices, key_sets)
-        intent_path = os.path.join(run_dir, "intent.parquet")
-        wrote = write_intents(
-            intent_path,
-            frame_indices,
-            frame_timestamps,
-            intents,
-            overwrite=cfg.overwrite,
-        )
-        status = "wrote" if wrote else "skipped"
-        print(f"{status} {intent_path}")
 
         # Write event/episode/return labels for RL
         if event_detector:
@@ -136,7 +94,8 @@ def precompute(cfg: LabelingConfig):
 
             # Detect events
             events_path = os.path.join(run_dir, "events.parquet")
-            events = event_detector.detect_events(video_path)
+            inputs_log = os.path.join(run_dir, "inputs.parquet")
+            events = event_detector.detect_events(video_path, inputs_log=inputs_log)
             if events is None:
                 print(f"skipped {events_path} (video corrupted)")
                 continue

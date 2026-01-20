@@ -18,22 +18,18 @@ def load_jsonl(path):
 @dataclass
 class Summary:
     total_frames: int = 0
-    intent_counts: Counter = None
     pressed_counts: Counter = None
     released_counts: Counter = None
     active_counts: Counter = None
     active_total: int = 0
     event_frames: int = 0
     run_lengths: dict = None
-    intent_transitions: int = 0
-    last_intent: str | None = None
     per_key_runs: dict = None
     max_simul_active: int = 0
 
 
 def summarize(records):
     summary = Summary(
-        intent_counts=Counter(),
         pressed_counts=Counter(),
         released_counts=Counter(),
         active_counts=Counter(),
@@ -45,13 +41,6 @@ def summarize(records):
 
     for rec in records:
         summary.total_frames += 1
-        intent = rec.get("pred_intent") or "<none>"
-        summary.intent_counts[intent] += 1
-
-        if summary.last_intent is not None and intent != summary.last_intent:
-            summary.intent_transitions += 1
-        summary.last_intent = intent
-
         pressed = rec.get("pressed") or []
         released = rec.get("released") or []
         active = rec.get("active") or []
@@ -99,7 +88,7 @@ def main():
         description="Evaluate reflex_infer predictions JSONL."
     )
     parser.add_argument("preds", help="Path to preds.jsonl")
-    parser.add_argument("--top", type=int, default=8, help="Top N keys/intents to show")
+    parser.add_argument("--top", type=int, default=8, help="Top N keys to show")
     args = parser.parse_args()
 
     records = load_jsonl(args.preds)
@@ -114,13 +103,9 @@ def main():
 
     print("Summary")
     print(f"  frames: {summary.total_frames}")
-    print(f"  intent transitions: {summary.intent_transitions}")
     print(f"  event frames: {summary.event_frames} ({event_rate:.2%})")
     print(f"  mean active keys/frame: {active_rate:.2f}")
     print(f"  max simultaneous active keys: {summary.max_simul_active}")
-
-    print("\nIntent distribution")
-    print_top(summary.intent_counts, args.top)
 
     print("\nTop pressed keys")
     print_top(summary.pressed_counts, args.top)

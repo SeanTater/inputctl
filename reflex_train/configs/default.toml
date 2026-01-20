@@ -13,10 +13,8 @@ momentum = 0.9        # SGD momentum
 # Model
 context_frames = 3
 action_horizon = 2
-goal_intent = "INFER"
 
 # Loss weights
-intent_weight = 0.25
 value_weight = 0.5
 inv_dyn_weight = 0.2
 
@@ -34,4 +32,3 @@ seed = 1337
 log_interval = 10
 checkpoint_dir = "checkpoints"
 key_threshold = 0.5
-require_intent_labels = false

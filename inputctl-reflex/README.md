@@ -15,34 +15,13 @@ cargo run -p inputctl-reflex -- \
   --model /path/to/model.onnx \
   live \
   --window "SuperTux" \
-  --fps 10 \
-  --goal-intent RUN
+  --fps 10
 ```
 
 Live mode:
 - Captures screenshots via `inputctl-capture`
 - Runs inference on each frame
 - Sends key events via `inputctl`
-
-### Eval Mode (Offline Evaluation)
-
-Runs inference on recorded data for evaluation:
-
-```bash
-cargo run -p inputctl-reflex -- \
-  --model /path/to/model.onnx \
-  eval \
-  --video recording.mp4 \
-  --frames frames.jsonl \
-  --intents intent.jsonl \
-  --out preds.jsonl
-```
-
-Eval mode:
-- Reads frames from video via ffmpeg
-- Runs inference on each frame
-- Writes predictions to `preds.jsonl`
-- Requires `ffmpeg` on the PATH
 
 ## Model Manifest
 
@@ -67,7 +46,6 @@ export ORT_LIB_LOCATION=/usr/lib/libonnxruntime.so
 
 The model predicts which keys to press based on:
 - Current screenshot
-- Goal intent (e.g., "RUN", "JUMP", "NAVIGATE_TO_MENU")
 
 ### Inverse Dynamics (Stub)
 

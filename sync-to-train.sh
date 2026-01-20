@@ -2,7 +2,7 @@
 
 # Sync datasets with ownership rules:
 # - Local owns raw capture files (video/frames/inputs)
-# - GPU owns generated labels (intent/events/episodes/returns)
+# - GPU owns generated labels (events/episodes/returns)
 
 LOCAL_DATASET="$HOME/repos/inputctl/dataset/"
 REMOTE_DATASET="sean-gallagher@intuition.local:/home/sean-gallagher/sandbox/inputctl/dataset/"
@@ -18,7 +18,6 @@ rsync -av --delete \
   --include 'frames.jsonl' \
   --include 'inputs.jsonl' \
   --include 'mouse.bin' \
-  --exclude 'intent.parquet' \
   --exclude 'events.parquet' \
   --exclude 'episodes.parquet' \
   --exclude 'returns.parquet' \
@@ -28,7 +27,6 @@ rsync -av --delete \
 # Pull labels from GPU (only labeled outputs)
 rsync -av --delete \
   --include '*/' \
-  --include 'intent.parquet' \
   --include 'events.parquet' \
   --include 'episodes.parquet' \
   --include 'returns.parquet' \

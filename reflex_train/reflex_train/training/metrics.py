@@ -8,8 +8,6 @@ class RunningMetrics:
         self.key_tp = 0
         self.key_fp = 0
         self.key_fn = 0
-        self.intent_correct = 0
-        self.intent_total = 0
 
     def update_loss(self, loss_val):
         self.loss_sum += loss_val
@@ -21,11 +19,6 @@ class RunningMetrics:
         self.key_tp += (preds & targs).sum().item()
         self.key_fp += (preds & ~targs).sum().item()
         self.key_fn += (~preds & targs).sum().item()
-
-    def update_intent(self, logits, targets):
-        preds = torch.argmax(logits, dim=1)
-        self.intent_correct += (preds == targets).sum().item()
-        self.intent_total += targets.numel()
 
     def summary(self):
         loss = self.loss_sum / self.batches if self.batches else 0.0
@@ -44,13 +37,9 @@ class RunningMetrics:
             if (precision + recall) > 0
             else 0.0
         )
-        intent_acc = (
-            self.intent_correct / self.intent_total if self.intent_total > 0 else 0.0
-        )
         return {
             "loss": loss,
             "key_precision": precision,
             "key_recall": recall,
             "key_f1": f1,
-            "intent_acc": intent_acc,
         }

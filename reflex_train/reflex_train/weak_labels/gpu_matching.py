@@ -68,7 +68,7 @@ class GPUTemplateMatcher:
         self,
         device: str | None = None,
         dtype: torch.dtype = torch.float32,
-        max_templates_per_batch: int | None = 16,
+        max_templates_per_batch: int | None = 128,
     ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"

@@ -18,8 +18,8 @@ from .gpu_matching import GPUTemplateMatcher, GPUVideoScanner
 # Keywords indicating an enemy has been attacked/killed
 ATTACKED_KEYWORDS = (
     "stomp", "stomped", "flat", "flatten", "melting", "dead", "die",
-    "squash", "squished", "hurt", "hit", "kill", "killed", "crush",
-    "burn", "explode", "boom",
+    "squash", "squished", "squish", "hurt", "hit", "kill", "killed", "crush",
+    "burn", "explode", "boom", "shatter",
 )
 
 
@@ -127,7 +127,9 @@ class EventDetector:
             return attacked_paths
         for root, _, files in os.walk(creatures_dir):
             # Skip tux/penny directories
-            if "tux" in root or "penny" in root:
+            rel_root = os.path.relpath(root, creatures_dir)
+            top_dir = rel_root.split(os.sep, 1)[0]
+            if top_dir in {"tux", "penny"}:
                 continue
             for fname in files:
                 if not fname.lower().endswith(".png"):

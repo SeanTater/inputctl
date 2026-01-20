@@ -103,10 +103,11 @@ more strongly.
 
 ```bash
 cd reflex_train
-PYTHONPATH=.. uv run python train_reflex.py --data_dir ../dataset/ --epochs 1 --batch_size 8
+PYTHONPATH=.. uv run python train_reflex.py --data_dir ../dataset/ --epochs 1 --batch_size 8 --workers 8
 ```
 
 Notes:
+- `--workers` controls the DataLoader worker count (higher can help hide decode time).
 - The progress bar shows an estimated total step count based on dataset size.
 - Use `--compile-model true` to try `torch.compile`.
 - `--inv-dyn-weight` enables the inverse dynamics auxiliary loss.

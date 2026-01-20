@@ -14,6 +14,23 @@ import polars as pl
 
 from .gpu_matching import GPUTemplateMatcher, GPUVideoScanner
 
+WEAK_LABEL_DEFAULTS = {
+    "base_dir": "/usr/share/games/supertux2/images",
+    "sprite_scale": 0.5,
+    "scale_by_resolution": {"1920x1080": 0.5},
+    "death_threshold": 0.75,
+    "attack_threshold": 0.75,
+    "frame_stride": 1,
+    "blank_frame_mean_threshold": 40.0,
+    "blank_frame_std_threshold": 10.0,
+    "attack_min_gap": 1,
+    "death_min_gap": 30 * 5,
+    "win_key": "KEY_BACKSLASH",
+    "win_key_min_presses": 1,
+    "win_key_window_s": 2.0,
+    "win_key_cooldown_s": 30.0,
+}
+
 # Keywords indicating an enemy has been attacked/killed
 ATTACKED_KEYWORDS = (
     "stomp",
@@ -56,19 +73,19 @@ class EventDetector:
 
     def __init__(
         self,
-        base_dir: str = "/usr/share/games/supertux2/images",
-        sprite_scale: float = 0.5,
-        death_threshold: float = 0.75,
-        attack_threshold: float = 0.75,
-        win_key: str = "KEY_BACKSLASH",
-        win_key_min_presses: int = 1,
-        win_key_window_s: float = 2.0,
-        win_key_cooldown_s: float = 30.0,
-        frame_stride: int = 1,
-        blank_frame_mean_threshold: float | None = 40.0,
-        blank_frame_std_threshold: float | None = 10.0,
-        attack_min_gap: int = 1,  # one per frame
-        death_min_gap: int = 30 * 5,  # five seconds
+        base_dir: str = WEAK_LABEL_DEFAULTS["base_dir"],
+        sprite_scale: float = WEAK_LABEL_DEFAULTS["sprite_scale"],
+        death_threshold: float = WEAK_LABEL_DEFAULTS["death_threshold"],
+        attack_threshold: float = WEAK_LABEL_DEFAULTS["attack_threshold"],
+        win_key: str = WEAK_LABEL_DEFAULTS["win_key"],
+        win_key_min_presses: int = WEAK_LABEL_DEFAULTS["win_key_min_presses"],
+        win_key_window_s: float = WEAK_LABEL_DEFAULTS["win_key_window_s"],
+        win_key_cooldown_s: float = WEAK_LABEL_DEFAULTS["win_key_cooldown_s"],
+        frame_stride: int = WEAK_LABEL_DEFAULTS["frame_stride"],
+        blank_frame_mean_threshold: float | None = WEAK_LABEL_DEFAULTS["blank_frame_mean_threshold"],
+        blank_frame_std_threshold: float | None = WEAK_LABEL_DEFAULTS["blank_frame_std_threshold"],
+        attack_min_gap: int = WEAK_LABEL_DEFAULTS["attack_min_gap"],
+        death_min_gap: int = WEAK_LABEL_DEFAULTS["death_min_gap"],
         scale_by_resolution: dict[str, float] | None = None,
     ):
         self.base_dir = base_dir

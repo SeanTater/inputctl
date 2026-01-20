@@ -46,13 +46,13 @@ Keyboard events captured during recording.
 
 ### events.parquet
 
-Terminal and attack events detected in gameplay.
+Terminal and attack events detected in gameplay (wins from key presses).
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `frame_idx` | Int64 | Frame where event occurred |
-| `event` | Utf8 | "DEATH", "WIN", or "ATTACK" |
-| `confidence` | Float64 | Detection confidence [0, 1] |
+| `event` | Utf8 | "DEATH", "WIN", or "ATTACK" (wins from key presses) |
+| `confidence` | Float64 | Detection confidence [0, 1] (wins are 1.0 from key presses) |
 
 **Written by:** `reflex_train/weak_labels/precompute.py` (via `precompute_labels.py`)
 **Read by:** `reflex_train/data/dataset.py`

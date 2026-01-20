@@ -5,20 +5,21 @@ This document describes how reflex_train moves from behavior cloning to offline 
 ## Goals
 
 - Learn a reflex policy that can execute key presses from vision.
-- Use offline signals (win/death events) to compute returns.
+- Use offline signals (win/death events) to compute returns, with wins marked from manual key presses.
 - Let a value function bias the policy toward higher-return behavior.
 - Keep the model compact by sharing the vision backbone.
 
 ## Data flow (offline)
 
-1. Record sessions into `recording.mp4`, `frames.jsonl`, `inputs.jsonl`.
+1. Record sessions into `recording.mp4`, `frames.parquet`, `inputs.parquet`.
 2. `precompute_labels.py` writes:
-   - `events.jsonl` (death/win/attack markers via GPU template matching)
-   - `episodes.jsonl` + `returns.jsonl` (terminal rewards + attack bonuses)
+   - `events.parquet` (death/attack via GPU template matching, wins via key presses)
+   - `episodes.parquet` + `returns.parquet` (terminal rewards + attack bonuses)
 3. Training streams frames per video so decoding stays sequential.
 
 Event detection uses **GPU-accelerated template matching** (FFT-based normalized cross-correlation)
-with torchcodec for video decoding. Falls back to CPU PyTorch if CUDA is unavailable.
+with torchcodec for video decoding. Wins are keyed off manual key presses from `inputs.parquet`.
+Falls back to CPU PyTorch if CUDA is unavailable.
 
 ## Model
 
@@ -66,7 +67,7 @@ that can compare alternative actions. That is not implemented yet.
 
 Returns are computed with three components:
 
-- **Terminal rewards**: +1 for win, -1 for death (per episode)
+- **Terminal rewards**: +1 for win, -1 for death (per episode, wins marked via key presses)
 - **Attack bonuses**: +0.1 (configurable) when enemy-squashed sprites are detected
 - **Survival bonus**: optional per-frame reward for staying alive
 

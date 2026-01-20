@@ -66,8 +66,8 @@ cargo build --release -p visionctl --bin visionctl
 This creates `dataset/run_<timestamp>/` folders with:
 
 - `recording.mp4`
-- `frames.jsonl`
-- `inputs.jsonl`
+- `frames.parquet`
+- `inputs.parquet`
 
 ## Precompute weak labels
 
@@ -77,7 +77,7 @@ python precompute_labels.py --data_dir ../dataset/
 ```
 
 Outputs per-session label files:
-- `events.parquet` - death/win/attack events detected via template matching
+- `events.parquet` - death/attack via template matching; wins via key presses in `inputs.parquet`
 - `episodes.parquet` - episode segmentation (spawn to terminal)
 - `returns.parquet` - discounted returns with attack bonuses
 

@@ -66,21 +66,15 @@ def precompute(cfg: LabelingConfig):
             sprite_scale=cfg.sprite_scale,
             death_threshold=cfg.death_threshold,
             attack_threshold=cfg.attack_threshold,
-            win_proximity_px=cfg.win_proximity_px,
-            sparkle_threshold=cfg.sparkle_threshold,
-            win_min_frames=cfg.win_min_frames,
+            win_key=cfg.win_key,
+            win_key_min_presses=cfg.win_key_min_presses,
+            win_key_window_s=cfg.win_key_window_s,
+            win_key_cooldown_s=cfg.win_key_cooldown_s,
             frame_stride=cfg.event_stride,
-            win_llm_gate=cfg.win_llm_gate,
-            win_llm_sample_stride=cfg.win_llm_sample_stride,
-            win_llm_prompt=cfg.win_llm_prompt,
-            win_llm_timeout_s=cfg.win_llm_timeout_s,
-            win_llm_model=cfg.win_llm_model,
-            win_llm_url=cfg.win_llm_url,
             blank_frame_mean_threshold=cfg.blank_frame_mean_threshold,
             blank_frame_std_threshold=cfg.blank_frame_std_threshold,
             attack_min_gap=cfg.attack_min_gap,
             death_min_gap=cfg.death_min_gap,
-            win_min_gap=cfg.win_min_gap,
         )
 
     for i, run_dir in enumerate(run_dirs):
@@ -100,7 +94,8 @@ def precompute(cfg: LabelingConfig):
 
             # Detect events
             events_path = os.path.join(run_dir, "events.parquet")
-            events = event_detector.detect_events(video_path)
+            inputs_log = os.path.join(run_dir, "inputs.parquet")
+            events = event_detector.detect_events(video_path, inputs_log=inputs_log)
             if events is None:
                 print(f"skipped {events_path} (video corrupted)")
                 continue

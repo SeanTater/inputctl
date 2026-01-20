@@ -5,6 +5,7 @@ Provides TM_CCOEFF_NORMED equivalent matching on CUDA tensors, with CPU fallback
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, ContextManager, Iterable, cast
 
 from PIL.Image import Image as PILImage
@@ -41,12 +42,20 @@ def _rgb_to_gray(rgb: torch.Tensor) -> torch.Tensor:
     return torch.einsum("chw,c->hw", rgb.float(), weights)
 
 
-class GPUTemplateMatcher:
-    """GPU-accelerated template matching using conv2d-based NCC.
+@dataclass
+class TemplateBatch:
+    kernels: torch.Tensor
+    masks: torch.Tensor
+    sizes: list[tuple[int, int]]
+    paths: list[str]
+    t_sum: torch.Tensor
+    t_std: torch.Tensor
+    max_h: int
+    max_w: int
 
-    Provides TM_CCOEFF_NORMED equivalent matching. Falls back to CPU
-    PyTorch if CUDA is unavailable.
-    """
+
+class GPUTemplateMatcher:
+    """GPU-accelerated template matching using batched conv2d NCC."""
 
     def __init__(
         self,
@@ -58,9 +67,7 @@ class GPUTemplateMatcher:
         self.device = torch.device(device)
         self.dtype = dtype
         self._template_cache: dict[str, torch.Tensor] = {}
-        self._template_stats_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         self._template_mask_cache: dict[int, torch.Tensor] = {}
-        self._ones_kernel_cache: dict[tuple[int, int], torch.Tensor] = {}
 
     def load_template(self, path: str, scale: float = 1.0) -> torch.Tensor:
         """Load a template image and convert to grayscale GPU tensor.
@@ -112,91 +119,19 @@ class GPUTemplateMatcher:
                 continue
         return templates
 
-    def _get_ones_kernel(self, h: int, w: int) -> torch.Tensor:
-        """Get cached ones kernel for local sums."""
-        key = (h, w)
-        if key not in self._ones_kernel_cache:
-            self._ones_kernel_cache[key] = torch.ones(
-                1, 1, h, w, device=self.device, dtype=self.dtype
-            )
-        return self._ones_kernel_cache[key]
-
-    def _get_template_stats(
-        self, template: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Get cached template stats (centered, std, sum, mask)."""
-        key = id(template)
-        if key not in self._template_stats_cache:
-            mask = self._template_mask_cache.get(key)
-            if mask is None:
-                mask = (template != 0.0).to(self.dtype)
-                self._template_mask_cache[key] = mask
-            t_sum = (template * mask).sum()
-            mask_sum = mask.sum().clamp(min=1.0)
-            t_mean = t_sum / mask_sum
-            t_centered = (template - t_mean) * mask
-            t_var = t_centered.pow(2).sum()
-            t_std = t_var.sqrt()
-            self._template_stats_cache[key] = (t_centered, t_std, t_sum, mask)
-        return self._template_stats_cache[key]
-
-    def match_template_ncc(
-        self,
-        frame: torch.Tensor,
-        template: torch.Tensor,
-    ) -> torch.Tensor:
-        """conv2d-based normalized cross-correlation.
-
-        Equivalent to cv2.matchTemplate with TM_CCOEFF_NORMED.
-
-        Args:
-            frame: (H, W) grayscale frame
-            template: (h, w) grayscale template
-
-        Returns:
-            (H-h+1, W-w+1) correlation map with values in [-1, 1]
-        """
-        H, W = frame.shape
-        h, w = template.shape
-
-        if h > H or w > W:
-            return torch.zeros(1, 1, device=self.device, dtype=self.dtype)
-
-        t_centered, t_std, t_sum, mask = self._get_template_stats(template)
-        if t_std.item() < 1e-7:
-            return torch.zeros(H - h + 1, W - w + 1, device=self.device, dtype=self.dtype)
-
-        frame_4d = frame.unsqueeze(0).unsqueeze(0)
-        template_kernel = t_centered.unsqueeze(0).unsqueeze(0)
-
-        correlation = F.conv2d(frame_4d, template_kernel)
-
-        mask_kernel = mask.unsqueeze(0).unsqueeze(0)
-        local_mask_sum = F.conv2d(frame_4d.new_ones((1, 1, H, W)), mask_kernel)
-        local_mask_sum = local_mask_sum.clamp(min=1.0)
-
-        local_sum = F.conv2d(frame_4d, mask_kernel)
-        local_sum_sq = F.conv2d(frame_4d * frame_4d, mask_kernel)
-
-        local_mean = local_sum / local_mask_sum
-        local_var = local_sum_sq / local_mask_sum - local_mean.pow(2)
-        local_var = local_var.clamp(min=1e-7)
-        local_std = (local_var * local_mask_sum).sqrt()
-
-        ncc = (correlation - local_mean * t_sum) / (local_std * t_std)
-        result = ncc.squeeze(0).squeeze(0)
-        return result.clamp(-1.0, 1.0)
-
-    def _pad_templates(
-        self, templates: list[tuple[torch.Tensor, str]]
-    ) -> tuple[torch.Tensor, torch.Tensor, list[tuple[int, int]], list[str]]:
-        """Pad templates/masks to common size and stack as conv2d kernels."""
+    def build_batch(self, templates: list[tuple[torch.Tensor, str]]) -> TemplateBatch:
+        """Pad templates/masks to common size and precompute NCC stats."""
         if not templates:
-            return (
-                torch.empty(0, 1, 1, 1, device=self.device, dtype=self.dtype),
-                torch.empty(0, 1, 1, 1, device=self.device, dtype=self.dtype),
-                [],
-                [],
+            empty = torch.empty(0, 1, 1, 1, device=self.device, dtype=self.dtype)
+            return TemplateBatch(
+                kernels=empty,
+                masks=empty,
+                sizes=[],
+                paths=[],
+                t_sum=empty,
+                t_std=empty,
+                max_h=0,
+                max_w=0,
             )
 
         sizes = [(tmpl.shape[0], tmpl.shape[1]) for tmpl, _ in templates]
@@ -207,7 +142,15 @@ class GPUTemplateMatcher:
         masks: list[torch.Tensor] = []
         paths: list[str] = []
         for tmpl, path in templates:
-            t_centered, _t_std, _t_sum, mask = self._get_template_stats(tmpl)
+            key = id(tmpl)
+            mask = self._template_mask_cache.get(key)
+            if mask is None:
+                mask = (tmpl != 0.0).to(self.dtype)
+                self._template_mask_cache[key] = mask
+            t_sum = (tmpl * mask).sum()
+            mask_sum = mask.sum().clamp(min=1.0)
+            t_mean = t_sum / mask_sum
+            t_centered = (tmpl - t_mean) * mask
             pad_h = max_h - tmpl.shape[0]
             pad_w = max_w - tmpl.shape[1]
             t_padded = F.pad(t_centered, (0, pad_w, 0, pad_h))
@@ -218,80 +161,65 @@ class GPUTemplateMatcher:
 
         kernel_stack = torch.stack(kernels, dim=0)
         mask_stack = torch.stack(masks, dim=0)
-        return kernel_stack, mask_stack, sizes, paths
+        t_sum = kernel_stack.sum(dim=(2, 3), keepdim=True)
+        t_std = kernel_stack.pow(2).sum(dim=(2, 3), keepdim=True).sqrt().clamp(min=1e-7)
 
-    def match_templates_ncc_batch(
-        self,
-        frame: torch.Tensor,
-        templates: list[tuple[torch.Tensor, str]],
-    ) -> tuple[torch.Tensor, list[tuple[int, int]], list[str]]:
-        """Batch NCC for templates padded to common size.
+        return TemplateBatch(
+            kernels=kernel_stack,
+            masks=mask_stack,
+            sizes=sizes,
+            paths=paths,
+            t_sum=t_sum,
+            t_std=t_std,
+            max_h=max_h,
+            max_w=max_w,
+        )
+
+    def match_batch(self, frame: torch.Tensor, batch: TemplateBatch) -> torch.Tensor:
+        """Batch NCC for padded templates.
 
         Returns:
-            (N, H-h+1, W-w+1) NCC maps, sizes per template, paths.
+            (N, H-h+1, W-w+1) NCC maps.
         """
-        H, W = frame.shape
-        kernel_stack, mask_stack, sizes, paths = self._pad_templates(templates)
-        if kernel_stack.numel() == 0:
-            return (
-                torch.empty(0, 0, 0, device=self.device, dtype=self.dtype),
-                [],
-                [],
-            )
+        if batch.kernels.numel() == 0:
+            return torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
 
-        max_h = kernel_stack.shape[-2]
-        max_w = kernel_stack.shape[-1]
-        if max_h > H or max_w > W:
-            return (
-                torch.empty(0, 0, 0, device=self.device, dtype=self.dtype),
-                sizes,
-                paths,
-            )
+        H, W = frame.shape
+        if batch.max_h > H or batch.max_w > W:
+            return torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
 
         frame_4d = frame.unsqueeze(0).unsqueeze(0)
-        correlation = F.conv2d(frame_4d, kernel_stack)
+        correlation = F.conv2d(frame_4d, batch.kernels)
 
         ones = frame_4d.new_ones((1, 1, H, W))
-        local_mask_sum = F.conv2d(ones, mask_stack).clamp(min=1.0)
-        local_sum = F.conv2d(frame_4d, mask_stack)
-        local_sum_sq = F.conv2d(frame_4d * frame_4d, mask_stack)
+        local_mask_sum = F.conv2d(ones, batch.masks).clamp(min=1.0)
+        local_sum = F.conv2d(frame_4d, batch.masks)
+        local_sum_sq = F.conv2d(frame_4d * frame_4d, batch.masks)
 
         local_mean = local_sum / local_mask_sum
         local_var = local_sum_sq / local_mask_sum - local_mean.pow(2)
         local_var = local_var.clamp(min=1e-7)
         local_std = (local_var * local_mask_sum).sqrt()
 
-        t_sum = kernel_stack.sum(dim=(2, 3), keepdim=True)
-        t_std = kernel_stack.pow(2).sum(dim=(2, 3), keepdim=True).sqrt().clamp(min=1e-7)
-
-        ncc = (correlation - local_mean * t_sum) / (local_std * t_std)
-        return ncc.squeeze(0).clamp(-1.0, 1.0), sizes, paths
+        ncc = (correlation - local_mean * batch.t_sum) / (local_std * batch.t_std)
+        return ncc.squeeze(0).clamp(-1.0, 1.0)
 
 
 
     def best_match(
         self,
         frame: torch.Tensor,
-        templates: list[tuple[torch.Tensor, str]],
+        batch: TemplateBatch,
         threshold: float,
     ) -> tuple[float, float] | None:
-        """Find best matching template location above threshold.
-
-        Args:
-            frame: (H, W) grayscale frame
-            templates: List of (tensor, path) tuples
-            threshold: Minimum correlation score
-
-        Returns:
-            Center position (x, y) or None if no match above threshold
-        """
-        ncc_maps, sizes, _paths = self.match_templates_ncc_batch(frame, templates)
+        """Find best matching template location above threshold."""
+        ncc_maps = self.match_batch(frame, batch)
         if ncc_maps.numel() == 0:
             return None
 
         best_pos = None
         best_score = threshold
-        for idx, (h, w) in enumerate(sizes):
+        for idx, (h, w) in enumerate(batch.sizes):
             ncc = ncc_maps[idx]
             max_val = ncc.max().item()
             if max_val >= best_score:
@@ -306,25 +234,16 @@ class GPUTemplateMatcher:
     def all_matches(
         self,
         frame: torch.Tensor,
-        templates: list[tuple[torch.Tensor, str]],
+        batch: TemplateBatch,
         threshold: float,
     ) -> list[tuple[float, float]]:
-        """Find all template matches above threshold.
-
-        Args:
-            frame: (H, W) grayscale frame
-            templates: List of (tensor, path) tuples
-            threshold: Minimum correlation score
-
-        Returns:
-            List of center positions (x, y)
-        """
+        """Find all template matches above threshold."""
         positions: list[tuple[float, float]] = []
-        ncc_maps, sizes, _paths = self.match_templates_ncc_batch(frame, templates)
+        ncc_maps = self.match_batch(frame, batch)
         if ncc_maps.numel() == 0:
             return positions
 
-        for idx, (h, w) in enumerate(sizes):
+        for idx, (h, w) in enumerate(batch.sizes):
             ncc = ncc_maps[idx]
             max_val = ncc.max().item()
             if max_val >= threshold:
@@ -335,60 +254,6 @@ class GPUTemplateMatcher:
 
         return positions
 
-    def best_match_cached(
-        self,
-        frame: torch.Tensor,
-        templates: list[tuple[torch.Tensor, str]],
-        threshold: float,
-        early_exit: float = 0.0,
-    ) -> tuple[float, float] | None:
-        """Find best match using conv2d NCC.
-
-        Args:
-            early_exit: If > 0, return immediately when score exceeds this value.
-        """
-        ncc_maps, sizes, _paths = self.match_templates_ncc_batch(frame, templates)
-        if ncc_maps.numel() == 0:
-            return None
-
-        best_pos = None
-        best_score = threshold
-        for idx, (h, w) in enumerate(sizes):
-            ncc = ncc_maps[idx]
-            max_val = ncc.max().item()
-            if max_val >= best_score:
-                max_idx = ncc.argmax()
-                max_y = (max_idx // ncc.shape[1]).item()
-                max_x = (max_idx % ncc.shape[1]).item()
-                best_score = max_val
-                best_pos = (max_x + w / 2, max_y + h / 2)
-                if early_exit > 0 and best_score >= early_exit:
-                    return best_pos
-
-        return best_pos
-
-    def all_matches_cached(
-        self,
-        frame: torch.Tensor,
-        templates: list[tuple[torch.Tensor, str]],
-        threshold: float,
-    ) -> list[tuple[float, float]]:
-        """Find all matches using conv2d NCC."""
-        positions: list[tuple[float, float]] = []
-        ncc_maps, sizes, _paths = self.match_templates_ncc_batch(frame, templates)
-        if ncc_maps.numel() == 0:
-            return positions
-
-        for idx, (h, w) in enumerate(sizes):
-            ncc = ncc_maps[idx]
-            max_val = ncc.max().item()
-            if max_val >= threshold:
-                max_idx = ncc.argmax()
-                max_y = (max_idx // ncc.shape[1]).item()
-                max_x = (max_idx % ncc.shape[1]).item()
-                positions.append((max_x + w / 2, max_y + h / 2))
-
-        return positions
 
 
 class GPUVideoScanner:
@@ -486,6 +351,11 @@ class GPUVideoScanner:
         total_frames = self._get_frame_count(decoder)
         proximity = proximity_px * self.sprite_scale
 
+        tux_batch = self.matcher.build_batch(tux_templates)
+        enemy_batch = self.matcher.build_batch(enemy_templates)
+        attacked_batch = self.matcher.build_batch(attacked_enemy_templates)
+        loot_batch = self.matcher.build_batch(loot_templates)
+
         hits: list[dict] = []
         stride = max(1, frame_stride)
         pbar = tqdm(total=total_frames, desc="Scanning", unit="f", disable=not show_progress)
@@ -557,17 +427,16 @@ class GPUVideoScanner:
                     continue
 
                 # Find Tux position (early exit - just need to find, not best match)
-                tux_pos = self.matcher.best_match_cached(
+                tux_pos = self.matcher.best_match(
                     gray,
-                    tux_templates,
+                    tux_batch,
                     sprite_threshold,
-                    early_exit=0.0,
                 )
 
                 # Find enemies, attacked enemies, and loot
-                enemy_positions = self.matcher.all_matches_cached(gray, enemy_templates, sprite_threshold)
-                attacked_positions = self.matcher.all_matches_cached(gray, attacked_enemy_templates, sprite_threshold)
-                loot_positions = self.matcher.all_matches_cached(gray, loot_templates, sprite_threshold)
+                enemy_positions = self.matcher.all_matches(gray, enemy_batch, sprite_threshold)
+                attacked_positions = self.matcher.all_matches(gray, attacked_batch, sprite_threshold)
+                loot_positions = self.matcher.all_matches(gray, loot_batch, sprite_threshold)
 
                 # Check proximity
                 enemy_near = self._is_near(tux_pos, enemy_positions, proximity)
@@ -613,6 +482,9 @@ class GPUVideoScanner:
         """
         decoder = self._get_video_decoder(video_path)
         total_frames = self._get_frame_count(decoder)
+
+        death_batch = self.matcher.build_batch(death_templates)
+        attacked_batch = self.matcher.build_batch(attacked_templates)
 
         results: list[dict] = []
         stride = max(1, frame_stride)
@@ -678,10 +550,10 @@ class GPUVideoScanner:
                     continue
 
                 # Check death (tux gameover sprite)
-                death_conf = self._max_template_conf(gray, death_templates, death_threshold)
+                death_conf = self._max_template_conf(gray, death_batch, death_threshold)
 
                 # Check attack (squashed/killed enemy sprites)
-                attack_conf = self._max_template_conf(gray, attacked_templates, attack_threshold)
+                attack_conf = self._max_template_conf(gray, attacked_batch, attack_threshold)
 
                 result = {
                     "death_conf": death_conf,
@@ -707,19 +579,19 @@ class GPUVideoScanner:
     def _max_template_conf(
         self,
         gray: torch.Tensor,
-        templates: list[tuple[torch.Tensor, str]],
+        batch: TemplateBatch,
         threshold: float,
     ) -> float:
         """Get max template match confidence using conv2d NCC."""
+        ncc_maps = self.matcher.match_batch(gray, batch)
+        if ncc_maps.numel() == 0:
+            return 0.0
+
         best_conf = 0.0
-        for tmpl, _ in templates:
-            if tmpl.shape[0] > gray.shape[0] or tmpl.shape[1] > gray.shape[1]:
-                continue
-            ncc = self.matcher.match_template_ncc(gray, tmpl)
-            if ncc.numel() > 0:
-                conf = ncc.max().item()
-                if conf >= threshold:
-                    best_conf = max(best_conf, conf)
+        for ncc in ncc_maps:
+            conf = ncc.max().item()
+            if conf >= threshold:
+                best_conf = max(best_conf, conf)
         return best_conf
 
     def _is_blank_frame(self, gray: torch.Tensor) -> bool:

@@ -17,20 +17,14 @@ from .gpu_matching import GPUTemplateMatcher, GPUVideoScanner
 # Keywords indicating an enemy has been attacked/killed
 ATTACKED_KEYWORDS = (
     "stomp",
-    "stomped",
     "flat",
-    "flatten",
-    "melting",
+    "melt",
     "dead",
-    "die",
     "squash",
-    "squished",
     "squish",
     "hurt",
     "hit",
     "kill",
-    "killed",
-    "crush",
     "burn",
     "explode",
     "boom",
@@ -57,7 +51,6 @@ class EventDetector:
     def __init__(
         self,
         base_dir: str = "/usr/share/games/supertux2/images",
-        sprite_scale: float = 0.5,
         death_threshold: float = 0.75,
         attack_threshold: float = 0.75,
         win_key: str = "KEY_BACKSLASH",
@@ -71,7 +64,6 @@ class EventDetector:
         death_min_gap: int = 30 * 5,  # five seconds
     ):
         self.base_dir = base_dir
-        self.sprite_scale = sprite_scale
         self.death_threshold = death_threshold
         self.attack_threshold = attack_threshold
         self.win_key = win_key
@@ -86,17 +78,16 @@ class EventDetector:
         self._matcher = GPUTemplateMatcher(max_templates_per_batch=128)
         self._scanner = GPUVideoScanner(
             matcher=self._matcher,
-            sprite_scale=sprite_scale,
             blank_frame_mean_threshold=blank_frame_mean_threshold,
             blank_frame_std_threshold=blank_frame_std_threshold,
         )
 
-        # Load templates
+        # Load templates (scale=1.0)
         self.death_templates = self._matcher.load_templates(
-            self._find_death_sprites(), scale=sprite_scale
+            self._find_death_sprites(), scale=1.0
         )
         self.attacked_templates = self._matcher.load_templates(
-            self._find_attacked_sprites(), scale=sprite_scale
+            self._find_attacked_sprites(), scale=1.0
         )
 
         if not self.death_templates:

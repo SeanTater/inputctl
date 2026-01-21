@@ -369,7 +369,6 @@ class GPUVideoScanner:
         self,
         matcher: GPUTemplateMatcher | None = None,
         batch_size: int = 16,
-        sprite_scale: float = 0.5,
         blank_frame_mean_threshold: float | None = None,
         blank_frame_std_threshold: float | None = None,
         max_templates_per_batch: int | None = 128,
@@ -378,7 +377,6 @@ class GPUVideoScanner:
             max_templates_per_batch=max_templates_per_batch
         )
         self.batch_size = batch_size
-        self.sprite_scale = sprite_scale
         self.blank_frame_mean_threshold = blank_frame_mean_threshold
         self.blank_frame_std_threshold = blank_frame_std_threshold
         self._decoder_cache: dict[str, VideoDecoder] = {}
@@ -455,7 +453,7 @@ class GPUVideoScanner:
         """
         decoder = self._get_video_decoder(video_path)
         total_frames = self._get_frame_count(decoder)
-        proximity = proximity_px * self.sprite_scale
+        proximity = proximity_px
 
         tux_batches = self.matcher.build_batches(tux_templates)
         enemy_batches = self.matcher.build_batches(enemy_templates)
@@ -499,18 +497,6 @@ class GPUVideoScanner:
 
             # Batch grayscale conversion
             grays = _rgb_to_gray(frames, dtype=self.matcher.dtype)
-
-            # Batch resize if needed
-            if self.sprite_scale != 1.0:
-                _, h, w = grays.shape
-                new_h = max(1, int(h * self.sprite_scale))
-                new_w = max(1, int(w * self.sprite_scale))
-                grays = F.interpolate(
-                    grays.unsqueeze(1),
-                    size=(new_h, new_w),
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze(1)
 
             # Process each frame in batch
             for i in range(actual_batch_size):
@@ -626,18 +612,6 @@ class GPUVideoScanner:
 
             # Batch grayscale conversion: (N, C, H, W) -> (N, H, W)
             grays = _rgb_to_gray(frames, dtype=self.matcher.dtype)
-
-            # Batch resize if needed
-            if self.sprite_scale != 1.0:
-                _, h, w = grays.shape
-                new_h = max(1, int(h * self.sprite_scale))
-                new_w = max(1, int(w * self.sprite_scale))
-                grays = F.interpolate(
-                    grays.unsqueeze(1),  # (N, 1, H, W)
-                    size=(new_h, new_w),
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze(1)  # (N, new_h, new_w)
 
             # Process each frame in batch
             for i in range(actual_batch_size):

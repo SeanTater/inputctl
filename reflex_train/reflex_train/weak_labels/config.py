@@ -8,7 +8,6 @@ class LabelingConfig(BaseSettings):
     )
 
     data_dir: str
-    sprite_scale: float = 0.5
     sprite_threshold: float = 0.85
     base_dir: str = "/usr/share/games/supertux2/images"
     overwrite: bool = False

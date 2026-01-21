@@ -63,7 +63,6 @@ def precompute(cfg: LabelingConfig):
     if cfg.detect_events:
         event_detector = EventDetector(
             base_dir=cfg.base_dir,
-            sprite_scale=cfg.sprite_scale,
             death_threshold=cfg.death_threshold,
             attack_threshold=cfg.attack_threshold,
             win_key=cfg.win_key,

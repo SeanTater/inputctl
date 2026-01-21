@@ -25,21 +25,23 @@ from reflex_train.data.dataset import (
 )
 
 
-def _rgb_to_gray(rgb: torch.Tensor) -> torch.Tensor:
+def _rgb_to_gray(rgb: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """Convert RGB tensor to grayscale.
 
     Uses ITU-R BT.601 weights: 0.299*R + 0.587*G + 0.114*B
 
     Args:
         rgb: (C, H, W) or (B, C, H, W) with C=3
+        dtype: Output dtype for grayscale tensor
 
     Returns:
         (H, W) or (B, H, W) float grayscale tensor
     """
-    weights = torch.tensor([0.299, 0.587, 0.114], device=rgb.device, dtype=torch.float32)
+    weights = torch.tensor([0.299, 0.587, 0.114], device=rgb.device, dtype=dtype)
+    rgb_f = rgb.to(dtype)
     if rgb.ndim == 4:
-        return torch.einsum("bchw,c->bhw", rgb.float(), weights)
-    return torch.einsum("chw,c->hw", rgb.float(), weights)
+        return torch.einsum("bchw,c->bhw", rgb_f, weights)
+    return torch.einsum("chw,c->hw", rgb_f, weights)
 
 
 @dataclass
@@ -67,7 +69,7 @@ class GPUTemplateMatcher:
     def __init__(
         self,
         device: str | None = None,
-        dtype: torch.dtype = torch.float32,
+        dtype: torch.dtype = torch.float16,
         max_templates_per_batch: int | None = 128,
     ):
         if device is None:
@@ -496,7 +498,7 @@ class GPUVideoScanner:
                 frames = frames.to(self.matcher.device)
 
             # Batch grayscale conversion
-            grays = _rgb_to_gray(frames)
+            grays = _rgb_to_gray(frames, dtype=self.matcher.dtype)
 
             # Batch resize if needed
             if self.sprite_scale != 1.0:
@@ -623,7 +625,7 @@ class GPUVideoScanner:
                 frames = frames.to(self.matcher.device)
 
             # Batch grayscale conversion: (N, C, H, W) -> (N, H, W)
-            grays = _rgb_to_gray(frames)
+            grays = _rgb_to_gray(frames, dtype=self.matcher.dtype)
 
             # Batch resize if needed
             if self.sprite_scale != 1.0:

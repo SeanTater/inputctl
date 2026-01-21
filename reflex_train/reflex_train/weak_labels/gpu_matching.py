@@ -1,8 +1,8 @@
-"""GPU-accelerated template matching using cosine similarity.
+"""GPU-accelerated template matching using Zero-mean Normalized Cross-Correlation (ZNCC).
 
-All templates are padded to a fixed 128x128 size, enabling a single batched
-conv2d call for all templates. This is optimized for bootstrapping weak labels,
-not for production use.
+Templates are padded to a fixed size and batch-processed via conv2d. ZNCC subtracts
+the local mean from both template and frame patches, making similarity invariant
+to brightness differences. Low-variance templates (uniform colors) are filtered out.
 """
 
 from __future__ import annotations
@@ -50,13 +50,14 @@ def _rgb_to_gray(rgb: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch
 @dataclass
 class TemplateBatch:
     """All templates in a single batch, padded to _TEMPLATE_SIZE x _TEMPLATE_SIZE."""
-    kernels: torch.Tensor  # (N, 1, 128, 128) L2-normalized templates
-    masks: torch.Tensor    # (N, 1, 128, 128) binary masks
+    kernels: torch.Tensor  # (N, 1, H, W) L2-normalized zero-mean templates
+    masks: torch.Tensor    # (N, 1, H, W) binary masks
+    mask_sums: torch.Tensor  # (N,) number of pixels per template mask
     n_templates: int
 
 
 class GPUTemplateMatcher:
-    """GPU-accelerated template matching using cosine similarity."""
+    """GPU-accelerated template matching using ZNCC."""
 
     def __init__(
         self,
@@ -99,19 +100,33 @@ class GPUTemplateMatcher:
         alpha_tensor = alpha_tensor.reshape(gray.height, gray.width) / 255.0
         
         # Binary mask: only pixels with alpha > 0.5 contribute
-        mask = (alpha_tensor > 0.5).to(self.dtype)
-        
-        # Zero out transparent pixels (gray already in [0,1])
-        tensor = (gray_tensor * mask).to(self.dtype)
-        t_norm = tensor.pow(2).sum().sqrt().clamp(min=1e-7)
-        tensor = tensor / t_norm
-        
+        mask = (alpha_tensor > 0.5).float()
+        mask_sum = mask.sum().item()
+
+        if mask_sum < 1:
+            return None  # Skip templates with no visible pixels
+
+        # Zero-mean normalization: subtract mean of masked pixels
+        # This makes cosine similarity invariant to brightness, measuring pattern only
+        masked_gray = gray_tensor * mask
+        template_mean = masked_gray.sum() / mask_sum
+        tensor = (gray_tensor - template_mean) * mask  # Zero-mean, masked
+
+        # L2 normalize the zero-mean template
+        # Skip low-variance templates - they match any uniform region
+        t_var = tensor.pow(2).sum()
+        var_per_pixel = t_var / mask_sum
+        if var_per_pixel < 0.005:
+            return None  # Skip uniform/low-variance templates
+        tensor = (tensor / t_var.sqrt()).to(self.dtype)
+        mask = mask.to(self.dtype)
+
         # Pad to fixed size
         pad_h = _TEMPLATE_SIZE - gray.height
         pad_w = _TEMPLATE_SIZE - gray.width
         tensor = F.pad(tensor, (0, pad_w, 0, pad_h))
         mask = F.pad(mask, (0, pad_w, 0, pad_h))
-        
+
         self._template_cache[path] = (tensor, mask)
         return tensor, mask
 
@@ -120,12 +135,11 @@ class GPUTemplateMatcher:
         kernels: list[torch.Tensor] = []
         masks: list[torch.Tensor] = []
         loaded_paths: list[str] = []
-        
+
         for path in paths:
             try:
                 result = self._load_template(path)
                 if result is None:
-                    print(f"  Skipped (too large): {path}")
                     continue
                 kernel, mask = result
                 kernels.append(kernel.unsqueeze(0))
@@ -134,60 +148,65 @@ class GPUTemplateMatcher:
             except Exception as e:
                 print(f"  Failed to load {path}: {e}")
                 continue
-        
+
         if not kernels:
             empty = torch.empty(0, 1, _TEMPLATE_SIZE, _TEMPLATE_SIZE, device=self.device, dtype=self.dtype)
-            return TemplateBatch(kernels=empty, masks=empty, n_templates=0)
-        
-        print(f"  Loaded {len(kernels)} templates: {loaded_paths}")
+            return TemplateBatch(
+                kernels=empty,
+                masks=empty,
+                mask_sums=torch.empty(0, device=self.device, dtype=self.dtype),
+                n_templates=0,
+            )
+
+        stacked_masks = torch.stack(masks, dim=0)
+        # mask_sums: (N,) sum of each mask for computing local mean
+        mask_sums = stacked_masks.view(len(masks), -1).sum(dim=1)
+
+        print(f"  Loaded {len(kernels)} templates")
         return TemplateBatch(
             kernels=torch.stack(kernels, dim=0),
-            masks=torch.stack(masks, dim=0),
+            masks=stacked_masks,
+            mask_sums=mask_sums,
             n_templates=len(kernels),
         )
 
-    def max_similarity(self, frame: torch.Tensor, batch: TemplateBatch, debug: bool = False) -> float:
-        """Get maximum similarity score across all templates.
-        
+    def max_similarity(self, frame: torch.Tensor, batch: TemplateBatch) -> float:
+        """Get maximum ZNCC score across all templates.
+
+        Uses zero-mean normalized cross-correlation (ZNCC) which is invariant to
+        brightness differences between template and frame patches.
+
         Args:
-            frame: (H, W) grayscale frame
-            batch: Pre-built template batch
-            debug: Print debug info
-            
+            frame: (H, W) grayscale frame in [0, 1]
+            batch: Pre-built template batch with zero-mean L2-normalized kernels
+
         Returns:
-            Maximum cosine similarity in [0, 1], or 0 if no templates.
+            Maximum ZNCC in [-1, 1], or 0 if no templates.
         """
         if batch.n_templates == 0:
-            if debug:
-                print(f"  max_similarity: n_templates=0")
             return 0.0
 
         H, W = frame.shape
         if _TEMPLATE_SIZE > H or _TEMPLATE_SIZE > W:
-            if debug:
-                print(f"  max_similarity: frame {H}x{W} smaller than template {_TEMPLATE_SIZE}")
             return 0.0
 
-        if debug:
-            print(f"  max_similarity: frame {H}x{W}, {batch.n_templates} templates")
-            print(f"    frame: min={frame.min().item():.4f} max={frame.max().item():.4f}")
-            print(f"    kernels sum: {batch.kernels.abs().sum().item():.4f}")
-            print(f"    masks sum: {batch.masks.sum().item():.0f}")
-
         frame_4d = frame.unsqueeze(0).unsqueeze(0)
-        
-        # Correlation with L2-normalized templates (2 conv2d calls total)
+
+        # ZNCC: correlation with zero-mean template, divided by local std
+        # Templates are already zero-mean and L2-normalized
         correlation = F.conv2d(frame_4d, batch.kernels)
+        local_sum = F.conv2d(frame_4d, batch.masks)
         local_sum_sq = F.conv2d(frame_4d * frame_4d, batch.masks)
-        local_norm = local_sum_sq.sqrt().clamp(min=1e-7)
-        
-        similarity = (correlation / local_norm).clamp(-1.0, 1.0)
-        
-        if debug:
-            print(f"    correlation max: {correlation.max().item():.4f}")
-            print(f"    local_norm min/max: {local_norm.min().item():.4f} / {local_norm.max().item():.4f}")
-            print(f"    similarity max: {similarity.max().item():.4f}")
-        
+
+        # Compute local variance in fp32 to avoid overflow (local_sum^2 can exceed fp16 max)
+        n = batch.mask_sums.view(1, -1, 1, 1).float()
+        local_var = local_sum_sq.float() - local_sum.float().pow(2) / n.clamp(min=1)
+
+        # Minimum variance threshold: uniform patches (sky, solid colors) shouldn't match
+        min_var = 0.005 * n
+        local_std = local_var.clamp(min=min_var).sqrt().to(frame.dtype)
+
+        similarity = (correlation / local_std).clamp(-1.0, 1.0)
         return similarity.max().item()
 
 
@@ -313,15 +332,12 @@ class GPUVideoScanner:
             for i in range(actual_batch_size):
                 gray = grays[i]
                 idx = indices[i]
-                debug_this = (idx == 0)  # Debug first frame only
 
                 if self._is_blank_frame(gray):
                     result = {"death_conf": 0.0, "attack_conf": 0.0}
                 else:
-                    if debug_this:
-                        print(f"Frame {idx}: gray shape={gray.shape}, min={gray.min().item():.4f}, max={gray.max().item():.4f}")
-                    death_conf = self.matcher.max_similarity(gray, death_batch, debug=debug_this)
-                    attack_conf = self.matcher.max_similarity(gray, attacked_batch, debug=debug_this)
+                    death_conf = self.matcher.max_similarity(gray, death_batch)
+                    attack_conf = self.matcher.max_similarity(gray, attacked_batch)
                     result = {"death_conf": death_conf, "attack_conf": attack_conf}
 
                 if prev_result is not None and prev_idx is not None:

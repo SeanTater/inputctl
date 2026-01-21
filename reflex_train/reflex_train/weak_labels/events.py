@@ -51,8 +51,8 @@ class EventDetector:
     def __init__(
         self,
         base_dir: str = "/usr/share/games/supertux2/images",
-        death_threshold: float = 0.75,
-        attack_threshold: float = 0.75,
+        death_threshold: float = 0.90,
+        attack_threshold: float = 0.96,
         win_key: str = "KEY_BACKSLASH",
         win_key_min_presses: int = 1,
         win_key_window_s: float = 2.0,

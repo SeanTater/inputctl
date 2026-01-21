@@ -1,6 +1,8 @@
-"""GPU-accelerated template matching using FFT-based normalized cross-correlation.
+"""GPU-accelerated template matching using cosine similarity.
 
-Provides TM_CCOEFF_NORMED equivalent matching on CUDA tensors, with CPU fallback.
+Uses a simplified matching approach: templates are L2-normalized at load time,
+and frame patches are normalized via local sum-of-squares. This gives cosine
+similarity with just 2 conv2d calls per batch instead of 4 for full NCC.
 """
 
 from __future__ import annotations
@@ -46,12 +48,10 @@ def _rgb_to_gray(rgb: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch
 
 @dataclass
 class TemplateBatch:
-    kernels: torch.Tensor
-    masks: torch.Tensor
+    kernels: torch.Tensor  # L2-normalized, zero-padded templates
+    masks: torch.Tensor  # Binary masks for valid pixels
     sizes: list[tuple[int, int]]
     paths: list[str]
-    t_sum: torch.Tensor
-    t_std: torch.Tensor
     max_h: int
     max_w: int
 
@@ -131,7 +131,7 @@ class GPUTemplateMatcher:
         return templates
 
     def _build_batch(self, templates: list[tuple[torch.Tensor, str]]) -> TemplateBatch:
-        """Pad templates/masks to common size and precompute NCC stats."""
+        """Pad templates/masks to common size and L2-normalize."""
         if not templates:
             empty = torch.empty(0, 1, 1, 1, device=self.device, dtype=self.dtype)
             return TemplateBatch(
@@ -139,8 +139,6 @@ class GPUTemplateMatcher:
                 masks=empty,
                 sizes=[],
                 paths=[],
-                t_sum=empty,
-                t_std=empty,
                 max_h=0,
                 max_w=0,
             )
@@ -158,13 +156,15 @@ class GPUTemplateMatcher:
             if mask is None:
                 mask = (tmpl != 0.0).to(self.dtype)
                 self._template_mask_cache[key] = mask
-            t_sum = (tmpl * mask).sum()
-            mask_sum = mask.sum().clamp(min=1.0)
-            t_mean = t_sum / mask_sum
-            t_centered = (tmpl - t_mean) * mask
+            
+            # L2-normalize the template (only over masked pixels)
+            t_masked = tmpl * mask
+            t_norm = t_masked.pow(2).sum().sqrt().clamp(min=1e-7)
+            t_normalized = t_masked / t_norm
+            
             pad_h = max_h - tmpl.shape[0]
             pad_w = max_w - tmpl.shape[1]
-            t_padded = F.pad(t_centered, (0, pad_w, 0, pad_h))
+            t_padded = F.pad(t_normalized, (0, pad_w, 0, pad_h))
             m_padded = F.pad(mask, (0, pad_w, 0, pad_h))
             kernels.append(t_padded.unsqueeze(0))
             masks.append(m_padded.unsqueeze(0))
@@ -172,22 +172,12 @@ class GPUTemplateMatcher:
 
         kernel_stack = torch.stack(kernels, dim=0)
         mask_stack = torch.stack(masks, dim=0)
-        t_sum = kernel_stack.sum(dim=(2, 3), keepdim=True).permute(1, 0, 2, 3)
-        t_std = (
-            kernel_stack.pow(2)
-            .sum(dim=(2, 3), keepdim=True)
-            .sqrt()
-            .clamp(min=1e-7)
-            .permute(1, 0, 2, 3)
-        )
 
         return TemplateBatch(
             kernels=kernel_stack,
             masks=mask_stack,
             sizes=sizes,
             paths=paths,
-            t_sum=t_sum,
-            t_std=t_std,
             max_h=max_h,
             max_w=max_w,
         )
@@ -221,10 +211,13 @@ class GPUTemplateMatcher:
         return TemplateBatches(batches=batches, sizes=sizes, paths=paths)
 
     def match_batch(self, frame: torch.Tensor, batch: TemplateBatch) -> torch.Tensor:
-        """Batch NCC for padded templates.
+        """Batch cosine similarity matching.
+
+        Templates are pre-normalized; we compute local L2 norm of frame patches
+        and divide correlation by it to get cosine similarity.
 
         Returns:
-            (N, H-h+1, W-w+1) NCC maps.
+            (N, H-h+1, W-w+1) similarity maps in [-1, 1].
         """
         if batch.kernels.numel() == 0:
             return torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
@@ -234,35 +227,22 @@ class GPUTemplateMatcher:
             return torch.empty(0, 0, 0, device=self.device, dtype=self.dtype)
 
         frame_4d = frame.unsqueeze(0).unsqueeze(0)
+        
+        # Correlation with L2-normalized templates
         correlation = F.conv2d(frame_4d, batch.kernels)
-
-        ones = frame_4d.new_ones((1, 1, H, W))
-        local_mask_sum = F.conv2d(ones, batch.masks).clamp(min=1.0)
-        local_sum = F.conv2d(frame_4d, batch.masks)
-        local_sum_sq = F.conv2d(frame_4d * frame_4d, batch.masks)
-
-        if correlation.dim() != 4 or local_sum.dim() != 4 or local_sum_sq.dim() != 4:
-            raise RuntimeError(
-                "match_batch expects 4D conv outputs; got "
-                f"corr={tuple(correlation.shape)}, sum={tuple(local_sum.shape)}, "
-                f"sum_sq={tuple(local_sum_sq.shape)}"
-            )
-
-        local_mean = local_sum / local_mask_sum
-        local_var = local_sum_sq / local_mask_sum - local_mean.pow(2)
-        local_var = local_var.clamp(min=1e-7)
-        local_std = (local_var * local_mask_sum).sqrt()
-
-        ncc = (correlation - local_mean * batch.t_sum) / (local_std * batch.t_std)
-        ncc = ncc.squeeze(0)
-        if ncc.dim() == 2:
-            ncc = ncc.unsqueeze(0)
-        if ncc.dim() != 3:
-            raise RuntimeError(
-                "match_batch expects 3D NCC maps (N,H,W) after squeeze; "
-                f"got {tuple(ncc.shape)}"
-            )
-        return ncc.clamp(-1.0, 1.0)
+        
+        # Local L2 norm of frame patches (sum of squares under each mask)
+        frame_sq = frame_4d * frame_4d
+        local_sum_sq = F.conv2d(frame_sq, batch.masks)
+        local_norm = local_sum_sq.sqrt().clamp(min=1e-7)
+        
+        # Cosine similarity = correlation / local_norm (templates already normalized)
+        similarity = correlation / local_norm
+        
+        similarity = similarity.squeeze(0)
+        if similarity.dim() == 2:
+            similarity = similarity.unsqueeze(0)
+        return similarity.clamp(-1.0, 1.0)
 
     def match_batches(self, frame: torch.Tensor, batches: TemplateBatches) -> torch.Tensor:
         """Match multiple template batches and concat results."""

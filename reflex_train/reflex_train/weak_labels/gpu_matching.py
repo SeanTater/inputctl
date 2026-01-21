@@ -36,7 +36,7 @@ def _rgb_to_gray(rgb: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch
     
     Returns values normalized to [0, 1] to avoid fp16 overflow in downstream ops.
     """
-    weights = torch.tensor([0.299, 0.587, 0.114], device=rgb.device, dtype=dtype)
+    weights = torch.tensor([0.299, 0.587, 0.114], device=rgb.device, dtype=torch.float32)
     # Convert to float32 first, normalize, then convert to target dtype
     # This avoids precision issues with uint8 -> fp16 -> divide
     rgb_f = rgb.float() / 255.0

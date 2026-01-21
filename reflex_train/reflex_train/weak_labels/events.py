@@ -75,24 +75,22 @@ class EventDetector:
         self.death_min_gap = death_min_gap
 
         # GPU matching setup
-        self._matcher = GPUTemplateMatcher(max_templates_per_batch=128)
+        self._matcher = GPUTemplateMatcher()
         self._scanner = GPUVideoScanner(
             matcher=self._matcher,
             blank_frame_mean_threshold=blank_frame_mean_threshold,
             blank_frame_std_threshold=blank_frame_std_threshold,
         )
 
-        # Load templates (scaled to match frame scaling in GPUVideoScanner)
-        self.death_templates = self._matcher.load_templates(
-            self._find_death_sprites(), scale=GPUVideoScanner._FRAME_SCALE
-        )
-        self.attacked_templates = self._matcher.load_templates(
-            self._find_attacked_sprites(), scale=GPUVideoScanner._FRAME_SCALE
-        )
+        # Build template batches (scaling applied internally)
+        death_paths = self._find_death_sprites()
+        attacked_paths = self._find_attacked_sprites()
+        self.death_batch = self._matcher.build_batch(death_paths)
+        self.attacked_batch = self._matcher.build_batch(attacked_paths)
 
-        if not self.death_templates:
+        if self.death_batch.n_templates == 0:
             print(f"Warning: No death templates found in {base_dir}")
-        if not self.attacked_templates:
+        if self.attacked_batch.n_templates == 0:
             print(f"Warning: No attacked enemy templates found in {base_dir}")
 
     def _find_death_sprites(self) -> list[str]:
@@ -135,8 +133,8 @@ class EventDetector:
         try:
             frame_results = self._scanner.detect_events(
                 video_path,
-                self.death_templates,
-                self.attacked_templates,
+                self.death_batch,
+                self.attacked_batch,
                 self.death_threshold,
                 self.attack_threshold,
                 frame_stride=self.frame_stride,

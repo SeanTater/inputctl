@@ -27,8 +27,8 @@ from reflex_train.data.dataset import (
 
 
 # Fixed sizes for all templates and frame scaling
-_TEMPLATE_SIZE = 96
-_FRAME_SCALE = 0.25
+_TEMPLATE_SIZE = 32
+_FRAME_SCALE = 0.50
 
 
 def _rgb_to_gray(rgb: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:

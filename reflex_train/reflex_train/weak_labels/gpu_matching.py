@@ -93,16 +93,16 @@ class GPUTemplateMatcher:
         if gray.height > _TEMPLATE_SIZE or gray.width > _TEMPLATE_SIZE:
             return None
 
-        gray_tensor = torch.tensor(list(cast(Iterable[int], gray.getdata())), dtype=self.dtype, device=self.device)
-        alpha_tensor = torch.tensor(list(cast(Iterable[int], alpha.getdata())), dtype=self.dtype, device=self.device)
-        gray_tensor = gray_tensor.reshape(gray.height, gray.width)
+        gray_tensor = torch.tensor(list(cast(Iterable[int], gray.getdata())), dtype=torch.float32, device=self.device)
+        alpha_tensor = torch.tensor(list(cast(Iterable[int], alpha.getdata())), dtype=torch.float32, device=self.device)
+        gray_tensor = gray_tensor.reshape(gray.height, gray.width) / 255.0
         alpha_tensor = alpha_tensor.reshape(gray.height, gray.width) / 255.0
         
         # Binary mask: only pixels with alpha > 0.5 contribute
         mask = (alpha_tensor > 0.5).to(self.dtype)
         
-        # Zero out transparent pixels, normalize to [0,1] first to avoid fp16 overflow
-        tensor = (gray_tensor / 255.0) * mask
+        # Zero out transparent pixels (gray already in [0,1])
+        tensor = (gray_tensor * mask).to(self.dtype)
         t_norm = tensor.pow(2).sum().sqrt().clamp(min=1e-7)
         tensor = tensor / t_norm
         

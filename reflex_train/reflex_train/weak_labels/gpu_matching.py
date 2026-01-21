@@ -244,8 +244,9 @@ class GPUVideoScanner:
             return False
         mean_val = gray.mean().item()
         std_val = gray.std().item()
-        mean_ok = self.blank_frame_mean_threshold is None or mean_val <= self.blank_frame_mean_threshold
-        std_ok = self.blank_frame_std_threshold is None or std_val <= self.blank_frame_std_threshold
+        # Thresholds are specified in [0,255] range, but frames are now [0,1]
+        mean_ok = self.blank_frame_mean_threshold is None or mean_val <= self.blank_frame_mean_threshold / 255.0
+        std_ok = self.blank_frame_std_threshold is None or std_val <= self.blank_frame_std_threshold / 255.0
         return mean_ok and std_ok
 
     def detect_events(

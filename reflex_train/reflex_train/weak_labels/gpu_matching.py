@@ -32,9 +32,12 @@ _FRAME_SCALE = 0.25
 
 
 def _rgb_to_gray(rgb: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    """Convert RGB tensor to grayscale using ITU-R BT.601 weights."""
+    """Convert RGB tensor to grayscale using ITU-R BT.601 weights.
+    
+    Returns values normalized to [0, 1] to avoid fp16 overflow in downstream ops.
+    """
     weights = torch.tensor([0.299, 0.587, 0.114], device=rgb.device, dtype=dtype)
-    rgb_f = rgb.to(dtype)
+    rgb_f = rgb.to(dtype) / 255.0
     if rgb.ndim == 4:
         return torch.einsum("bchw,c->bhw", rgb_f, weights)
     return torch.einsum("chw,c->hw", rgb_f, weights)
@@ -94,8 +97,8 @@ class GPUTemplateMatcher:
         # Binary mask: only pixels with alpha > 0.5 contribute
         mask = (alpha_tensor > 0.5).to(self.dtype)
         
-        # Zero out transparent pixels and L2-normalize
-        tensor = gray_tensor * mask
+        # Zero out transparent pixels, normalize to [0,1] first to avoid fp16 overflow
+        tensor = (gray_tensor / 255.0) * mask
         t_norm = tensor.pow(2).sum().sqrt().clamp(min=1e-7)
         tensor = tensor / t_norm
         

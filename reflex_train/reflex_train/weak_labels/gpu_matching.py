@@ -146,22 +146,33 @@ class GPUTemplateMatcher:
             n_templates=len(kernels),
         )
 
-    def max_similarity(self, frame: torch.Tensor, batch: TemplateBatch) -> float:
+    def max_similarity(self, frame: torch.Tensor, batch: TemplateBatch, debug: bool = False) -> float:
         """Get maximum similarity score across all templates.
         
         Args:
             frame: (H, W) grayscale frame
             batch: Pre-built template batch
+            debug: Print debug info
             
         Returns:
             Maximum cosine similarity in [0, 1], or 0 if no templates.
         """
         if batch.n_templates == 0:
+            if debug:
+                print(f"  max_similarity: n_templates=0")
             return 0.0
 
         H, W = frame.shape
         if _TEMPLATE_SIZE > H or _TEMPLATE_SIZE > W:
+            if debug:
+                print(f"  max_similarity: frame {H}x{W} smaller than template {_TEMPLATE_SIZE}")
             return 0.0
+
+        if debug:
+            print(f"  max_similarity: frame {H}x{W}, {batch.n_templates} templates")
+            print(f"    frame: min={frame.min().item():.4f} max={frame.max().item():.4f}")
+            print(f"    kernels sum: {batch.kernels.abs().sum().item():.4f}")
+            print(f"    masks sum: {batch.masks.sum().item():.0f}")
 
         frame_4d = frame.unsqueeze(0).unsqueeze(0)
         
@@ -171,6 +182,12 @@ class GPUTemplateMatcher:
         local_norm = local_sum_sq.sqrt().clamp(min=1e-7)
         
         similarity = (correlation / local_norm).clamp(-1.0, 1.0)
+        
+        if debug:
+            print(f"    correlation max: {correlation.max().item():.4f}")
+            print(f"    local_norm min/max: {local_norm.min().item():.4f} / {local_norm.max().item():.4f}")
+            print(f"    similarity max: {similarity.max().item():.4f}")
+        
         return similarity.max().item()
 
 
@@ -295,12 +312,15 @@ class GPUVideoScanner:
             for i in range(actual_batch_size):
                 gray = grays[i]
                 idx = indices[i]
+                debug_this = (idx == 0)  # Debug first frame only
 
                 if self._is_blank_frame(gray):
                     result = {"death_conf": 0.0, "attack_conf": 0.0}
                 else:
-                    death_conf = self.matcher.max_similarity(gray, death_batch)
-                    attack_conf = self.matcher.max_similarity(gray, attacked_batch)
+                    if debug_this:
+                        print(f"Frame {idx}: gray shape={gray.shape}, min={gray.min().item():.4f}, max={gray.max().item():.4f}")
+                    death_conf = self.matcher.max_similarity(gray, death_batch, debug=debug_this)
+                    attack_conf = self.matcher.max_similarity(gray, attacked_batch, debug=debug_this)
                     result = {"death_conf": death_conf, "attack_conf": attack_conf}
 
                 if prev_result is not None and prev_idx is not None:

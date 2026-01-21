@@ -27,8 +27,8 @@ from reflex_train.data.dataset import (
 
 
 # Fixed sizes for all templates and frame scaling
-_TEMPLATE_SIZE = 128
-_FRAME_SCALE = 0.5
+_TEMPLATE_SIZE = 96
+_FRAME_SCALE = 0.25
 
 
 def _rgb_to_gray(rgb: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -91,11 +91,12 @@ class GPUTemplateMatcher:
         gray_tensor = gray_tensor.reshape(gray.height, gray.width)
         alpha_tensor = alpha_tensor.reshape(gray.height, gray.width) / 255.0
         
-        tensor = gray_tensor * alpha_tensor
-        mask = (alpha_tensor > 0.0).to(self.dtype)
+        # Binary mask: only pixels with alpha > 0.5 contribute
+        mask = (alpha_tensor > 0.5).to(self.dtype)
         
-        # L2-normalize
-        t_norm = (tensor * mask).pow(2).sum().sqrt().clamp(min=1e-7)
+        # Zero out transparent pixels and L2-normalize
+        tensor = gray_tensor * mask
+        t_norm = tensor.pow(2).sum().sqrt().clamp(min=1e-7)
         tensor = tensor / t_norm
         
         # Pad to fixed size
@@ -111,22 +112,27 @@ class GPUTemplateMatcher:
         """Load templates and build a single batch."""
         kernels: list[torch.Tensor] = []
         masks: list[torch.Tensor] = []
+        loaded_paths: list[str] = []
         
         for path in paths:
             try:
                 result = self._load_template(path)
                 if result is None:
+                    print(f"  Skipped (too large): {path}")
                     continue
                 kernel, mask = result
                 kernels.append(kernel.unsqueeze(0))
                 masks.append(mask.unsqueeze(0))
-            except Exception:
+                loaded_paths.append(path)
+            except Exception as e:
+                print(f"  Failed to load {path}: {e}")
                 continue
         
         if not kernels:
             empty = torch.empty(0, 1, _TEMPLATE_SIZE, _TEMPLATE_SIZE, device=self.device, dtype=self.dtype)
             return TemplateBatch(kernels=empty, masks=empty, n_templates=0)
         
+        print(f"  Loaded {len(kernels)} templates: {loaded_paths}")
         return TemplateBatch(
             kernels=torch.stack(kernels, dim=0),
             masks=torch.stack(masks, dim=0),

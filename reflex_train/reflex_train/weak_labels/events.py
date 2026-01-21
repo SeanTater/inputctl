@@ -82,12 +82,12 @@ class EventDetector:
             blank_frame_std_threshold=blank_frame_std_threshold,
         )
 
-        # Load templates (scale=1.0)
+        # Load templates (scaled to match frame scaling in GPUVideoScanner)
         self.death_templates = self._matcher.load_templates(
-            self._find_death_sprites(), scale=1.0
+            self._find_death_sprites(), scale=GPUVideoScanner._FRAME_SCALE
         )
         self.attacked_templates = self._matcher.load_templates(
-            self._find_attacked_sprites(), scale=1.0
+            self._find_attacked_sprites(), scale=GPUVideoScanner._FRAME_SCALE
         )
 
         if not self.death_templates:

@@ -365,6 +365,9 @@ class GPUVideoScanner:
     Processes videos entirely on GPU for maximum throughput.
     """
 
+    # Fixed scale factor for frame resizing (balances speed vs accuracy)
+    _FRAME_SCALE: float = 0.5
+
     def __init__(
         self,
         matcher: GPUTemplateMatcher | None = None,
@@ -453,7 +456,7 @@ class GPUVideoScanner:
         """
         decoder = self._get_video_decoder(video_path)
         total_frames = self._get_frame_count(decoder)
-        proximity = proximity_px
+        proximity = proximity_px * self._FRAME_SCALE
 
         tux_batches = self.matcher.build_batches(tux_templates)
         enemy_batches = self.matcher.build_batches(enemy_templates)
@@ -497,6 +500,17 @@ class GPUVideoScanner:
 
             # Batch grayscale conversion
             grays = _rgb_to_gray(frames, dtype=self.matcher.dtype)
+
+            # Resize frames to match template scale
+            _, h, w = grays.shape
+            new_h = max(1, int(h * self._FRAME_SCALE))
+            new_w = max(1, int(w * self._FRAME_SCALE))
+            grays = F.interpolate(
+                grays.unsqueeze(1),
+                size=(new_h, new_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
 
             # Process each frame in batch
             for i in range(actual_batch_size):
@@ -612,6 +626,17 @@ class GPUVideoScanner:
 
             # Batch grayscale conversion: (N, C, H, W) -> (N, H, W)
             grays = _rgb_to_gray(frames, dtype=self.matcher.dtype)
+
+            # Resize frames to match template scale
+            _, h, w = grays.shape
+            new_h = max(1, int(h * self._FRAME_SCALE))
+            new_w = max(1, int(w * self._FRAME_SCALE))
+            grays = F.interpolate(
+                grays.unsqueeze(1),
+                size=(new_h, new_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
 
             # Process each frame in batch
             for i in range(actual_batch_size):

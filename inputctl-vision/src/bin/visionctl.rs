@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use dialoguer::{Input, Select};
+use inputctl_vision::{Agent, Config, LlmConfig, Region, VisionCtl};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -7,7 +8,6 @@ use std::process::Command;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
-use inputctl_vision::{Agent, Config, LlmConfig, Region, VisionCtl};
 
 #[derive(Parser)]
 #[command(name = "visionctl")]
@@ -441,7 +441,8 @@ fn run_find_template(
         "Finding template"
     );
 
-    let results = inputctl_vision::detection::find_template(&screenshot_path, template, Some(threshold))?;
+    let results =
+        inputctl_vision::detection::find_template(&screenshot_path, template, Some(threshold))?;
 
     // Output JSON
     println!("{}", serde_json::to_string_pretty(&results).unwrap());
@@ -469,7 +470,8 @@ fn run_click_template(template: &str, threshold: f32) -> inputctl_vision::Result
 
     info!(template = %template, threshold = threshold, "Finding template to click");
 
-    let results = inputctl_vision::detection::find_template(screenshot_path, template, Some(threshold))?;
+    let results =
+        inputctl_vision::detection::find_template(screenshot_path, template, Some(threshold))?;
 
     if results.is_empty() {
         warn!("No matches found - cannot click");
@@ -539,9 +541,9 @@ fn install_desktop_file() -> inputctl_vision::Result<()> {
         inputctl_vision::Error::ScreenshotFailed(format!("Failed to get executable path: {}", e))
     })?;
 
-    let exe_path_str = exe_path
-        .to_str()
-        .ok_or_else(|| inputctl_vision::Error::ScreenshotFailed("Invalid executable path".to_string()))?;
+    let exe_path_str = exe_path.to_str().ok_or_else(|| {
+        inputctl_vision::Error::ScreenshotFailed("Invalid executable path".to_string())
+    })?;
 
     println!("Detected executable: {}", exe_path_str);
 
@@ -554,7 +556,10 @@ fn install_desktop_file() -> inputctl_vision::Result<()> {
 
     // Create directory if it doesn't exist
     fs::create_dir_all(&desktop_dir).map_err(|e| {
-        inputctl_vision::Error::ScreenshotFailed(format!("Failed to create desktop directory: {}", e))
+        inputctl_vision::Error::ScreenshotFailed(format!(
+            "Failed to create desktop directory: {}",
+            e
+        ))
     })?;
 
     let desktop_file_path = desktop_dir.join("visionctl.desktop");
@@ -729,9 +734,9 @@ fn run_setup() -> inputctl_vision::Result<()> {
     println!("Smooth FPS: {}", config.cursor.smooth_fps);
     println!();
 
-    config
-        .save()
-        .map_err(|e| inputctl_vision::Error::ScreenshotFailed(format!("Failed to save config: {}", e)))?;
+    config.save().map_err(|e| {
+        inputctl_vision::Error::ScreenshotFailed(format!("Failed to save config: {}", e))
+    })?;
 
     println!("Configuration saved to: {}", Config::path().display());
     println!("\nYou can edit this file manually or run 'visionctl setup' again.");

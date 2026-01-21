@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::Write;
 /// Simple Screenshot Test - No LLM Required
 ///
 /// This example captures a screenshot with cursor marker and saves it to a file.
@@ -13,6 +11,8 @@ use std::io::Write;
 ///   - KDE Plasma 6.0+ with KWin
 ///   - Desktop file with screenshot permission (see README)
 use inputctl_vision::VisionCtl;
+use std::fs::File;
+use std::io::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== VisionCtl Screenshot Test ===\n");

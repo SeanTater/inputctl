@@ -1,10 +1,12 @@
 use crate::error::{Error, Result};
+use crate::primitives::screen::Region;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType, Stream};
 use ashpd::desktop::PersistMode;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::os::fd::AsRawFd;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub struct CaptureFrame {
@@ -21,6 +23,8 @@ pub struct PortalCapture {
     height: u32,
     start_time: Instant,
     _stream: Stream,
+    crop_region: Option<Region>,
+    alpha_region: Mutex<Option<Region>>,
 }
 
 impl PortalCapture {
@@ -94,6 +98,8 @@ impl PortalCapture {
             .map(|s| (s.0 as u32, s.1 as u32))
             .unwrap_or((0, 0));
 
+        let crop_region = stream_region(&stream);
+
         Ok(Self {
             _pipeline: pipeline,
             appsink,
@@ -101,6 +107,8 @@ impl PortalCapture {
             height,
             start_time: Instant::now(),
             _stream: stream,
+            crop_region,
+            alpha_region: Mutex::new(None),
         })
     }
 
@@ -125,14 +133,142 @@ impl PortalCapture {
             .unwrap_or((self.width, self.height));
 
         let timestamp_ms = self.start_time.elapsed().as_millis();
+        let alpha_region = if self.crop_region.is_some() {
+            None
+        } else {
+            let mut cached = self
+                .alpha_region
+                .lock()
+                .map_err(|_| Error::ScreenshotFailed("Alpha crop lock poisoned".into()))?;
+            if cached.is_none() {
+                *cached = alpha_bounds(map.as_slice(), info.0, info.1);
+            }
+            *cached
+        };
+
+        let crop_region = self.crop_region.or(alpha_region);
+        let rgba = crop_rgba(map.as_slice(), info.0, info.1, crop_region)?;
+
+        let (width, height) = if let Some(region) = crop_region {
+            if region.x >= 0
+                && region.y >= 0
+                && region.x as u32 + region.width <= info.0
+                && region.y as u32 + region.height <= info.1
+            {
+                (region.width, region.height)
+            } else {
+                (info.0, info.1)
+            }
+        } else {
+            (info.0, info.1)
+        };
 
         Ok(CaptureFrame {
-            rgba: map.as_slice().to_vec(),
-            width: info.0,
-            height: info.1,
+            rgba,
+            width,
+            height,
             timestamp_ms,
         })
     }
+}
+
+fn stream_region(stream: &Stream) -> Option<Region> {
+    if stream.source_type() != Some(SourceType::Window) {
+        return None;
+    }
+
+    let (stream_width, stream_height) = stream.size()?;
+    let (x, y) = stream.position().unwrap_or((0, 0));
+
+    if stream_width <= 0 || stream_height <= 0 {
+        return None;
+    }
+
+    Some(Region {
+        x,
+        y,
+        width: stream_width as u32,
+        height: stream_height as u32,
+    })
+}
+
+fn crop_rgba(rgba: &[u8], width: u32, height: u32, region: Option<Region>) -> Result<Vec<u8>> {
+    let region = match region {
+        Some(region) => region,
+        None => return Ok(rgba.to_vec()),
+    };
+
+    if region.x < 0
+        || region.y < 0
+        || region.x as u32 + region.width > width
+        || region.y as u32 + region.height > height
+    {
+        return Ok(rgba.to_vec());
+    }
+
+    let crop_x = region.x as u32;
+    let crop_y = region.y as u32;
+    let crop_w = region.width;
+    let crop_h = region.height;
+
+    let mut out = vec![0u8; (crop_w * crop_h * 4) as usize];
+    let src_stride = (width * 4) as usize;
+    let dst_stride = (crop_w * 4) as usize;
+
+    for row in 0..crop_h {
+        let src_start = ((crop_y + row) as usize * src_stride) + (crop_x * 4) as usize;
+        let src_end = src_start + dst_stride;
+        let dst_start = (row as usize) * dst_stride;
+        out[dst_start..dst_start + dst_stride].copy_from_slice(&rgba[src_start..src_end]);
+    }
+
+    Ok(out)
+}
+
+fn alpha_bounds(rgba: &[u8], width: u32, height: u32) -> Option<Region> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+
+    let row_stride = (width * 4) as usize;
+    for y in 0..height {
+        let row_start = (y as usize) * row_stride;
+        for x in 0..width {
+            let idx = row_start + (x as usize * 4) + 3;
+            if rgba.get(idx).copied().unwrap_or(0) != 0 {
+                found = true;
+                if x < min_x {
+                    min_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
+            }
+        }
+    }
+
+    if !found {
+        return None;
+    }
+
+    Some(Region {
+        x: min_x as i32,
+        y: min_y as i32,
+        width: max_x - min_x + 1,
+        height: max_y - min_y + 1,
+    })
 }
 
 fn gst_video_info(caps: &gst::CapsRef) -> Option<(u32, u32)> {

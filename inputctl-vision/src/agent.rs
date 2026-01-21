@@ -7,8 +7,8 @@
 use crate::debugger::{AgentObserver, Iteration, NoopObserver};
 use crate::error::Result;
 use crate::llm::{execute_tool, get_action_tools, LlmClient, LlmConfig, Message};
-use inputctl_capture::{capture_screenshot, get_screen_dimensions, ScreenshotOptions};
 use crate::VisionCtl;
+use inputctl_capture::{capture_screenshot, get_screen_dimensions, ScreenshotOptions};
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;

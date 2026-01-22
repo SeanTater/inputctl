@@ -24,3 +24,5 @@ reflex_train/*.onnx.data
 reflex_train/*_manifest.json
 reflex_train/preds*.jsonl
 dataset/
+
+.claude

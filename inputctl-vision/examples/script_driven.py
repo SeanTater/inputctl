@@ -39,8 +39,8 @@ def main():
         model="llava"
     )
 
-    print("Step 1: Taking screenshot with grid overlay...")
-    screenshot = ctl.screenshot(grid=True)
+    print("Step 1: Taking screenshot...")
+    screenshot = ctl.screenshot()
     print(f"✓ Screenshot captured: {len(screenshot):,} bytes\n")
 
     print("Step 2: Asking LLM to identify what's on screen...")
@@ -53,8 +53,8 @@ def main():
     # Example: Ask LLM where a specific element is
     print("Step 4: Asking LLM where to click...")
     location = ctl.ask(
-        "Looking at the grid overlay, which grid cell contains a terminal or console window? "
-        "Just respond with the cell identifier like 'B3' or say 'none' if you don't see one."
+        "Where on the screen is a terminal or console window? "
+        "Answer with approximate x,y coordinates from 0 to 1000, or say 'none' if you don't see one."
     )
     print(f"LLM says the terminal is at: {location}\n")
 
@@ -62,12 +62,13 @@ def main():
     if "none" not in location.lower():
         print("Step 5: Script executing action based on LLM guidance...")
         # Extract cell identifier (simple parsing)
-        cell = location.strip().split()[0].upper()
+        coords = location.strip().split()[0].strip("(),")
 
-        print(f"Would click at: {cell} (skipping actual click for safety)")
+        print(f"Would click at: {coords} (skipping actual click for safety)")
         # Uncomment to actually click:
-        # ctl.click_at_grid(cell)
-        # print(f"✓ Clicked at {cell}")
+        # x_str, y_str = coords.split(",")
+        # ctl.click_at(float(x_str), float(y_str))
+        # print(f"✓ Clicked at {coords}")
     else:
         print("Step 5: No terminal found, skipping click")
 
@@ -76,7 +77,7 @@ def main():
     print("- Script maintains control flow")
     print("- LLM used for perception/understanding")
     print("- Script makes decisions based on LLM responses")
-    print("- Grid overlay helps LLM communicate locations")
+    print("- LLM returns approximate 0..1000 coordinates for locations")
 
     print("\nTry uncommenting the click line to actually interact with the screen!")
 

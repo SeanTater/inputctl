@@ -81,7 +81,7 @@ def main():
     # Initial user request
     user_request = """
     I want you to explore what's on my screen. Please:
-    1. Take a screenshot with grid overlay
+    1. Take a screenshot
     2. Describe what you see
     3. If you see a terminal or text editor, click on it
 
@@ -173,7 +173,7 @@ def main():
     print("- LLM can see screen via screenshot tool")
     print("- LLM decides which tools to use and when")
     print("- Script just executes tools as requested")
-    print("- Grid overlay helps LLM understand spatial layout")
+    print("- LLM relies on direct pointing or coordinates for locations")
 
 
 if __name__ == "__main__":

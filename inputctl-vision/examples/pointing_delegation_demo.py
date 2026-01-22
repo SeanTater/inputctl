@@ -40,7 +40,7 @@ def brain_agent():
         print("[Brain]: Great! Now I can click.")
         ctl.execute_tool("click", {"button": "left"})
     else:
-        print("[Brain]: Vision specialist failed. Maybe I'll try the grid overlay instead.")
+        print("[Brain]: Vision specialist failed. I'll fall back to a simpler description.")
 
 # --- MOCK VISION SPECIALIST ---
 # To actually run this, you would need Ollama running with qwen2-vl:2b

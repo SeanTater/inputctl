@@ -6,7 +6,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::os::fd::AsRawFd;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub struct CaptureFrame {
@@ -23,8 +23,7 @@ pub struct PortalCapture {
     height: u32,
     start_time: Instant,
     _stream: Stream,
-    alpha_region: Mutex<Option<Region>>,
-    debug_logged: OnceLock<()>,
+    auto_crop_region: Mutex<Option<Region>>,
 }
 
 impl PortalCapture {
@@ -105,8 +104,7 @@ impl PortalCapture {
             height,
             start_time: Instant::now(),
             _stream: stream,
-            alpha_region: Mutex::new(None),
-            debug_logged: OnceLock::new(),
+            auto_crop_region: Mutex::new(None),
         })
     }
 
@@ -131,9 +129,9 @@ impl PortalCapture {
             .unwrap_or((self.width, self.height));
 
         let timestamp_ms = self.start_time.elapsed().as_millis();
-        let detected_region = {
+        let auto_crop_region = {
             let mut cached = self
-                .alpha_region
+                .auto_crop_region
                 .lock()
                 .map_err(|_| Error::ScreenshotFailed("Auto-crop lock poisoned".into()))?;
             if cached.is_none() {
@@ -142,26 +140,9 @@ impl PortalCapture {
             *cached
         };
 
-        if self.debug_logged.get().is_none() {
-            let _ = self.debug_logged.set(());
-            let (black_ratio, non_black_ratio) = frame_black_ratio(map.as_slice());
-            println!(
-                "Portal stream: frame={}x{}, stream_hint={}x{}, stream_pos={:?}, stream_size={:?}, auto_crop={:?}, black_ratio={:.4}, non_black_ratio={:.4}",
-                info.0,
-                info.1,
-                self.width,
-                self.height,
-                self._stream.position(),
-                self._stream.size(),
-                detected_region,
-                black_ratio,
-                non_black_ratio
-            );
-        }
+        let rgba = crop_rgba(map.as_slice(), info.0, info.1, auto_crop_region)?;
 
-        let rgba = crop_rgba(map.as_slice(), info.0, info.1, detected_region)?;
-
-        let (width, height) = if let Some(region) = detected_region {
+        let (width, height) = if let Some(region) = auto_crop_region {
             if region.x >= 0
                 && region.y >= 0
                 && region.x as u32 + region.width <= info.0
@@ -266,30 +247,6 @@ fn non_black_bounds(rgba: &[u8], width: u32, height: u32) -> Option<Region> {
         width: max_x - min_x + 1,
         height: max_y - min_y + 1,
     })
-}
-
-fn frame_black_ratio(rgba: &[u8]) -> (f64, f64) {
-    if rgba.is_empty() {
-        return (0.0, 0.0);
-    }
-
-    let mut black = 0u64;
-    let mut total = 0u64;
-
-    for chunk in rgba.chunks_exact(4) {
-        total += 1;
-        if chunk[0] == 0 && chunk[1] == 0 && chunk[2] == 0 {
-            black += 1;
-        }
-    }
-
-    if total == 0 {
-        return (0.0, 0.0);
-    }
-
-    let black_ratio = black as f64 / total as f64;
-    let non_black_ratio = 1.0 - black_ratio;
-    (black_ratio, non_black_ratio)
 }
 
 fn gst_video_info(caps: &gst::CapsRef) -> Option<(u32, u32)> {

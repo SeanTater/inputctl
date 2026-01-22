@@ -6,7 +6,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::os::fd::AsRawFd;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub struct CaptureFrame {
@@ -23,8 +23,8 @@ pub struct PortalCapture {
     height: u32,
     start_time: Instant,
     _stream: Stream,
-    crop_region: Option<Region>,
     alpha_region: Mutex<Option<Region>>,
+    debug_logged: OnceLock<()>,
 }
 
 impl PortalCapture {
@@ -98,8 +98,6 @@ impl PortalCapture {
             .map(|s| (s.0 as u32, s.1 as u32))
             .unwrap_or((0, 0));
 
-        let crop_region = stream_region(&stream);
-
         Ok(Self {
             _pipeline: pipeline,
             appsink,
@@ -107,8 +105,8 @@ impl PortalCapture {
             height,
             start_time: Instant::now(),
             _stream: stream,
-            crop_region,
             alpha_region: Mutex::new(None),
+            debug_logged: OnceLock::new(),
         })
     }
 
@@ -133,23 +131,37 @@ impl PortalCapture {
             .unwrap_or((self.width, self.height));
 
         let timestamp_ms = self.start_time.elapsed().as_millis();
-        let alpha_region = if self.crop_region.is_some() {
-            None
-        } else {
+        let detected_region = {
             let mut cached = self
                 .alpha_region
                 .lock()
-                .map_err(|_| Error::ScreenshotFailed("Alpha crop lock poisoned".into()))?;
+                .map_err(|_| Error::ScreenshotFailed("Auto-crop lock poisoned".into()))?;
             if cached.is_none() {
-                *cached = alpha_bounds(map.as_slice(), info.0, info.1);
+                *cached = non_black_bounds(map.as_slice(), info.0, info.1);
             }
             *cached
         };
 
-        let crop_region = self.crop_region.or(alpha_region);
-        let rgba = crop_rgba(map.as_slice(), info.0, info.1, crop_region)?;
+        if self.debug_logged.get().is_none() {
+            let _ = self.debug_logged.set(());
+            let (black_ratio, non_black_ratio) = frame_black_ratio(map.as_slice());
+            println!(
+                "Portal stream: frame={}x{}, stream_hint={}x{}, stream_pos={:?}, stream_size={:?}, auto_crop={:?}, black_ratio={:.4}, non_black_ratio={:.4}",
+                info.0,
+                info.1,
+                self.width,
+                self.height,
+                self._stream.position(),
+                self._stream.size(),
+                detected_region,
+                black_ratio,
+                non_black_ratio
+            );
+        }
 
-        let (width, height) = if let Some(region) = crop_region {
+        let rgba = crop_rgba(map.as_slice(), info.0, info.1, detected_region)?;
+
+        let (width, height) = if let Some(region) = detected_region {
             if region.x >= 0
                 && region.y >= 0
                 && region.x as u32 + region.width <= info.0
@@ -170,26 +182,6 @@ impl PortalCapture {
             timestamp_ms,
         })
     }
-}
-
-fn stream_region(stream: &Stream) -> Option<Region> {
-    if stream.source_type() != Some(SourceType::Window) {
-        return None;
-    }
-
-    let (stream_width, stream_height) = stream.size()?;
-    let (x, y) = stream.position().unwrap_or((0, 0));
-
-    if stream_width <= 0 || stream_height <= 0 {
-        return None;
-    }
-
-    Some(Region {
-        x,
-        y,
-        width: stream_width as u32,
-        height: stream_height as u32,
-    })
 }
 
 fn crop_rgba(rgba: &[u8], width: u32, height: u32, region: Option<Region>) -> Result<Vec<u8>> {
@@ -225,7 +217,7 @@ fn crop_rgba(rgba: &[u8], width: u32, height: u32, region: Option<Region>) -> Re
     Ok(out)
 }
 
-fn alpha_bounds(rgba: &[u8], width: u32, height: u32) -> Option<Region> {
+fn non_black_bounds(rgba: &[u8], width: u32, height: u32) -> Option<Region> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -240,21 +232,26 @@ fn alpha_bounds(rgba: &[u8], width: u32, height: u32) -> Option<Region> {
     for y in 0..height {
         let row_start = (y as usize) * row_stride;
         for x in 0..width {
-            let idx = row_start + (x as usize * 4) + 3;
-            if rgba.get(idx).copied().unwrap_or(0) != 0 {
-                found = true;
-                if x < min_x {
-                    min_x = x;
-                }
-                if y < min_y {
-                    min_y = y;
-                }
-                if x > max_x {
-                    max_x = x;
-                }
-                if y > max_y {
-                    max_y = y;
-                }
+            let idx = row_start + (x as usize * 4);
+            let r = rgba.get(idx).copied().unwrap_or(0);
+            let g = rgba.get(idx + 1).copied().unwrap_or(0);
+            let b = rgba.get(idx + 2).copied().unwrap_or(0);
+            if r == 0 && g == 0 && b == 0 {
+                continue;
+            }
+
+            found = true;
+            if x < min_x {
+                min_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
             }
         }
     }
@@ -269,6 +266,30 @@ fn alpha_bounds(rgba: &[u8], width: u32, height: u32) -> Option<Region> {
         width: max_x - min_x + 1,
         height: max_y - min_y + 1,
     })
+}
+
+fn frame_black_ratio(rgba: &[u8]) -> (f64, f64) {
+    if rgba.is_empty() {
+        return (0.0, 0.0);
+    }
+
+    let mut black = 0u64;
+    let mut total = 0u64;
+
+    for chunk in rgba.chunks_exact(4) {
+        total += 1;
+        if chunk[0] == 0 && chunk[1] == 0 && chunk[2] == 0 {
+            black += 1;
+        }
+    }
+
+    if total == 0 {
+        return (0.0, 0.0);
+    }
+
+    let black_ratio = black as f64 / total as f64;
+    let non_black_ratio = 1.0 - black_ratio;
+    (black_ratio, non_black_ratio)
 }
 
 fn gst_video_info(caps: &gst::CapsRef) -> Option<(u32, u32)> {

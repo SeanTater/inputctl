@@ -1,4 +1,9 @@
+use crate::capture::{CaptureFrame, FrameSource, PortalCapture};
 use crate::error::{Error, Result};
+use crate::recorder_ops::{
+    build_ffmpeg_args, normalize_even_dimensions, pipewire_to_ffmpeg_format, run_capture_loop,
+    write_summary_outputs,
+};
 use arrow::array::{Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -8,14 +13,11 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::fs::{self, File};
 use std::io::{BufWriter, IsTerminal, Write};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Video encoder selection.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -65,21 +67,148 @@ pub struct RecorderConfig {
     pub encoder: Encoder,
 }
 
-#[derive(Clone)]
-struct EventRecord {
-    timestamp: u128,
-    key_code: u16,
-    key_name: String,
-    state: &'static str,
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputEvent {
+    pub timestamp: u128,
+    pub key_code: u16,
+    pub key_name: String,
+    pub state: &'static str,
 }
 
-#[derive(Clone)]
-struct FrameTiming {
-    frame_idx: u64,
-    timestamp: u128,
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameTiming {
+    pub frame_idx: u64,
+    pub timestamp: u128,
 }
 
-fn write_frames_parquet(
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecorderSummary {
+    pub frames: Vec<FrameTiming>,
+    pub events: Vec<InputEvent>,
+    pub captured_frames: u64,
+    pub dropped_frames: u64,
+    pub slow_frames: u64,
+}
+
+pub trait Clock {
+    fn now(&self) -> Instant;
+    fn now_ms(&self) -> u128;
+    fn sleep(&self, duration: Duration);
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn now_ms(&self) -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
+pub trait VideoWriter {
+    fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()>;
+    fn flush(&mut self) -> std::io::Result<()>;
+    fn finish(&mut self) -> std::io::Result<()>;
+}
+
+struct FfmpegWriter {
+    process: std::process::Child,
+    writer: BufWriter<std::process::ChildStdin>,
+}
+
+impl FfmpegWriter {
+    fn new(args: &[String]) -> Result<Self> {
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let mut process = std::process::Command::new("ffmpeg")
+            .args(&args_ref)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| Error::ScreenshotFailed(format!("Failed to start ffmpeg: {}", e)))?;
+
+        let stdin = process
+            .stdin
+            .take()
+            .ok_or_else(|| Error::ScreenshotFailed("Failed to open ffmpeg stdin".to_string()))?;
+        let writer = BufWriter::with_capacity(8 * 1024 * 1024, stdin);
+        Ok(Self { process, writer })
+    }
+}
+
+impl VideoWriter for FfmpegWriter {
+    fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        self.writer.write_all(frame)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.writer.flush()?;
+        drop(std::mem::replace(
+            &mut self.writer,
+            BufWriter::new(std::io::sink()),
+        ));
+        let _ = self.process.wait();
+        Ok(())
+    }
+}
+
+pub trait InputEventSource {
+    fn poll_events(&mut self) -> std::io::Result<Vec<InputEvent>>;
+}
+
+struct EvdevInputSource {
+    device: Device,
+}
+
+impl EvdevInputSource {
+    fn new(device: Device) -> Self {
+        Self { device }
+    }
+}
+
+impl InputEventSource for EvdevInputSource {
+    fn poll_events(&mut self) -> std::io::Result<Vec<InputEvent>> {
+        let mut records = Vec::new();
+        let events = self.device.fetch_events()?;
+        for event in events {
+            if event.event_type() == evdev::EventType::KEY {
+                let val = event.value();
+                let state = match val {
+                    0 => "up",
+                    1 => "down",
+                    2 => "repeat",
+                    _ => "unknown",
+                };
+
+                let key = Key::new(event.code());
+                records.push(InputEvent {
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                    key_code: event.code(),
+                    key_name: format!("{:?}", key),
+                    state,
+                });
+            }
+        }
+        Ok(records)
+    }
+}
+
+pub(crate) fn write_frames_parquet(
     path: &PathBuf,
     frames: &[FrameTiming],
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -107,68 +236,9 @@ fn write_frames_parquet(
     Ok(())
 }
 
-/// Check if VAAPI H.264 encoding is available via ffmpeg.
-fn detect_vaapi() -> Option<String> {
-    // Check if render device exists
-    let render_device = "/dev/dri/renderD128";
-    if !std::path::Path::new(render_device).exists() {
-        return None;
-    }
-
-    // Test if ffmpeg can actually use VAAPI for H.264 encoding
-    // This runs a quick encode test with null output
-    let result = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-vaapi_device",
-            render_device,
-            "-f",
-            "lavfi",
-            "-i",
-            "color=black:s=64x64:d=0.1",
-            "-vf",
-            "format=nv12,hwupload",
-            "-c:v",
-            "h264_vaapi",
-            "-f",
-            "null",
-            "-",
-        ])
-        .output();
-
-    match result {
-        Ok(output) if output.status.success() => Some(render_device.to_string()),
-        _ => None,
-    }
-}
-
-/// Resolve encoder choice, falling back if hardware unavailable.
-fn resolve_encoder(requested: &Encoder) -> (Encoder, Option<String>) {
-    match requested {
-        Encoder::Auto => {
-            if let Some(device) = detect_vaapi() {
-                (Encoder::Vaapi, Some(device))
-            } else {
-                (Encoder::X264, None)
-            }
-        }
-        Encoder::Vaapi => {
-            if let Some(device) = detect_vaapi() {
-                (Encoder::Vaapi, Some(device))
-            } else {
-                eprintln!("Warning: VAAPI not available, falling back to x264");
-                (Encoder::X264, None)
-            }
-        }
-        Encoder::X264 => (Encoder::X264, None),
-    }
-}
-
-fn write_inputs_parquet(
+pub(crate) fn write_inputs_parquet(
     path: &PathBuf,
-    events: &[EventRecord],
+    events: &[InputEvent],
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let schema = Schema::new(vec![
         Field::new("timestamp", DataType::Int64, false),
@@ -200,16 +270,69 @@ fn write_inputs_parquet(
     Ok(())
 }
 
+/// Check if VAAPI H.264 encoding is available via ffmpeg.
+fn detect_vaapi() -> Option<String> {
+    let render_device = "/dev/dri/renderD128";
+    if !std::path::Path::new(render_device).exists() {
+        return None;
+    }
+
+    let result = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-vaapi_device",
+            render_device,
+            "-f",
+            "lavfi",
+            "-i",
+            "color=black:s=64x64:d=0.1",
+            "-vf",
+            "format=nv12,hwupload",
+            "-c:v",
+            "h264_vaapi",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => Some(render_device.to_string()),
+        _ => None,
+    }
+}
+
+fn resolve_encoder(requested: &Encoder) -> (Encoder, Option<String>) {
+    match requested {
+        Encoder::Auto => {
+            if let Some(device) = detect_vaapi() {
+                (Encoder::Vaapi, Some(device))
+            } else {
+                (Encoder::X264, None)
+            }
+        }
+        Encoder::Vaapi => {
+            if let Some(device) = detect_vaapi() {
+                (Encoder::Vaapi, Some(device))
+            } else {
+                eprintln!("Warning: VAAPI not available, falling back to x264");
+                (Encoder::X264, None)
+            }
+        }
+        Encoder::X264 => (Encoder::X264, None),
+    }
+}
+
 pub fn run_recorder(config: RecorderConfig) -> Result<()> {
-    // Check for ffmpeg
     if Command::new("ffmpeg").arg("-version").output().is_err() {
         return Err(Error::ScreenshotFailed(
             "ffmpeg not found in PATH".to_string(),
         ));
     }
 
-    // Select input device
-    let device = if let Some(path) = config.device_path {
+    let device = if let Some(path) = config.device_path.clone() {
         Device::open(&path)
             .map_err(|e| Error::ScreenshotFailed(format!("Failed to open device: {}", e)))?
     } else {
@@ -231,7 +354,6 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
 
     println!("Selected device: {}", device.name().unwrap_or("Unknown"));
 
-    // Prepare output directory
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
     let session_dir = config.output_dir.join(format!("run_{}", timestamp));
 
@@ -240,12 +362,9 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
     })?;
     println!("Recording to: {}", session_dir.display());
 
-    // Buffer events in memory for parquet output
-    // Pre-allocate for ~1 hour of recording to avoid reallocations
-    let input_events: Arc<Mutex<Vec<EventRecord>>> =
-        Arc::new(Mutex::new(Vec::with_capacity(10000))); // ~3 events/sec for 1hr
-    let frame_timings: Arc<Mutex<Vec<FrameTiming>>> =
-        Arc::new(Mutex::new(Vec::with_capacity(config.fps as usize * 3600)));
+    let mut capture = PortalCapture::connect(None)?;
+    let mut input_source = EvdevInputSource::new(device);
+    let mut clock = SystemClock;
 
     let mut stats_file = if config.stats_interval.is_some() {
         Some(
@@ -261,12 +380,94 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
         None
     };
 
-    // Start portal capture and determine dimensions from first frame
-    let capture = crate::capture::PortalCapture::connect(None)?;
+    let (mut writer, width, height, pipewire_format, mut pending_frame) =
+        prepare_capture(&mut capture, &config, &session_dir)?;
+    println!("Recording dimensions: {}x{}", width, height);
+
+    let summary = run_recorder_with_sources(
+        &config,
+        &mut capture,
+        &mut *writer,
+        &mut input_source,
+        &mut clock,
+        width,
+        height,
+        pipewire_format,
+        pending_frame.take(),
+        stats_file.as_mut(),
+    )?;
+
+    write_recorder_outputs(&session_dir, &summary);
+
+    println!("Recording saved to {}", session_dir.display());
+    println!("Total Frames: {}", summary.captured_frames);
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_recorder_with_sources(
+    config: &RecorderConfig,
+    frame_source: &mut dyn FrameSource,
+    writer: &mut dyn VideoWriter,
+    input_source: &mut dyn InputEventSource,
+    clock: &mut dyn Clock,
+    width: u32,
+    height: u32,
+    _pipewire_format: String,
+    pending_frame: Option<CaptureFrame>,
+    stats_file: Option<&mut File>,
+) -> Result<RecorderSummary> {
+    let mut stats = stats_file
+        .map(|s| s.try_clone())
+        .transpose()
+        .map_err(|e| Error::ScreenshotFailed(format!("Failed to clone stats file: {}", e)))?;
+
+    let summary = run_capture_loop(
+        config,
+        frame_source,
+        writer,
+        input_source,
+        clock,
+        width,
+        height,
+        pending_frame,
+        &mut stats,
+    )?;
+
+    if let Err(e) = writer.flush() {
+        eprintln!("Warning: failed to flush encoder: {}", e);
+    }
+    if let Err(e) = writer.finish() {
+        eprintln!("Warning: failed to finish encoder: {}", e);
+    }
+
+    Ok(summary)
+}
+
+fn prepare_capture(
+    capture: &mut PortalCapture,
+    config: &RecorderConfig,
+    session_dir: &Path,
+) -> Result<(Box<dyn VideoWriter>, u32, u32, String, Option<CaptureFrame>)> {
     let mut pending_frame = Some(
         capture
             .next_frame(Duration::from_millis(2000))
             .map_err(|e| Error::ScreenshotFailed(format!("Capture failed: {}", e)))?,
+    );
+
+    let pipewire_format = pending_frame
+        .as_ref()
+        .map(|frame| frame.format.clone())
+        .unwrap_or_else(|| "BGRx".to_string());
+
+    let (pixel_format, unknown) = pipewire_to_ffmpeg_format(&pipewire_format);
+    if let Some(other) = unknown {
+        eprintln!("Warning: Unknown format '{}', assuming bgr0", other);
+    }
+    println!(
+        "Pixel format: {} (PipeWire: {})",
+        pixel_format, pipewire_format
     );
 
     let mut width = pending_frame.as_ref().map(|frame| frame.width).unwrap_or(0);
@@ -274,63 +475,15 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
         .as_ref()
         .map(|frame| frame.height)
         .unwrap_or(0);
-    let pipewire_format = pending_frame
-        .as_ref()
-        .map(|frame| frame.format.clone())
-        .unwrap_or_else(|| "BGRx".to_string());
 
-    // Map PipeWire format to ffmpeg pixel_format
-    let pixel_format = match pipewire_format.as_str() {
-        "BGRx" => "bgr0",
-        "BGRA" => "bgra",
-        "RGBx" => "rgb0",
-        "RGBA" => "rgba",
-        "xRGB" => "0rgb",
-        "ARGB" => "argb",
-        "xBGR" => "0bgr",
-        "ABGR" => "abgr",
-        other => {
-            eprintln!("Warning: Unknown format '{}', assuming bgr0", other);
-            "bgr0"
-        }
-    };
-    println!(
-        "Pixel format: {} (PipeWire: {})",
-        pixel_format, pipewire_format
-    );
-
-    // Ensure even dimensions for broader decoder compatibility
-    if width % 2 != 0 {
-        width -= 1;
-    }
-    if height % 2 != 0 {
-        height -= 1;
-    }
-
-    // Trim the first frame to even dimensions if needed.
     if let Some(frame) = pending_frame.take() {
-        if frame.width == width && frame.height == height {
-            pending_frame = Some(frame);
-        } else if frame.width >= width && frame.height >= height {
-            let even_len = (width * height * 4) as usize;
-            if frame.rgba.len() >= even_len {
-                let mut rgba = frame.rgba;
-                rgba.truncate(even_len);
-                pending_frame = Some(crate::capture::CaptureFrame {
-                    rgba,
-                    width,
-                    height,
-                    timestamp_ms: frame.timestamp_ms,
-                    format: frame.format.clone(),
-                });
-            }
-        }
+        let (frame, even_width, even_height) = normalize_even_dimensions(frame);
+        width = even_width;
+        height = even_height;
+        pending_frame = Some(frame);
     }
 
-    println!("Recording dimensions: {}x{}", width, height);
     let video_path = session_dir.join("recording.mp4");
-
-    // Resolve encoder choice
     let (encoder, vaapi_device) = resolve_encoder(&config.encoder);
     println!(
         "Encoder: {:?}{}",
@@ -341,292 +494,25 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
             .unwrap_or_default()
     );
 
-    // Build FFmpeg args based on encoder
-    let video_size = format!("{}x{}", width, height);
-    let fps_str = config.fps.to_string();
-    let qp_str = config.crf.to_string(); // Used as QP for VAAPI, CRF for x264
+    let args = build_ffmpeg_args(
+        &encoder,
+        config.max_resolution,
+        width,
+        height,
+        config.fps,
+        config.crf,
+        pixel_format,
+        &config.preset,
+        &video_path,
+        vaapi_device.as_deref(),
+    );
+    let writer = Box::new(FfmpegWriter::new(&args)?);
 
-    // Build filter chain based on encoder and scaling needs
-    let filter = match (&encoder, &config.max_resolution) {
-        (Encoder::Vaapi, Some((max_w, max_h))) => {
-            // VAAPI: convert to nv12, upload to GPU, scale on GPU
-            format!(
-                "format=nv12,hwupload,scale_vaapi=w='min({},iw)':h='min({},ih)':force_original_aspect_ratio=decrease",
-                max_w, max_h
-            )
-        }
-        (Encoder::Vaapi, None) => {
-            // VAAPI: just convert and upload
-            "format=nv12,hwupload".to_string()
-        }
-        (_, Some((max_w, max_h))) => {
-            // x264 with scaling: CPU scale
-            format!(
-                "scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                max_w, max_h
-            )
-        }
-        _ => String::new(),
-    };
-
-    if !filter.is_empty() {
-        println!("Filter: {}", filter);
-    }
-
-    let mut args: Vec<String> = Vec::new();
-
-    // VAAPI requires device init before input
-    if let Some(ref device) = vaapi_device {
-        args.extend(["-vaapi_device".to_string(), device.clone()]);
-    }
-
-    // Input specification
-    args.extend([
-        "-f".to_string(),
-        "rawvideo".to_string(),
-        "-pixel_format".to_string(),
-        pixel_format.to_string(),
-        "-video_size".to_string(),
-        video_size,
-        "-framerate".to_string(),
-        fps_str,
-        "-i".to_string(),
-        "-".to_string(),
-    ]);
-
-    // Filter chain
-    if !filter.is_empty() {
-        args.extend(["-vf".to_string(), filter]);
-    }
-
-    // Encoder-specific options
-    match encoder {
-        Encoder::Vaapi => {
-            args.extend([
-                "-c:v".to_string(),
-                "h264_vaapi".to_string(),
-                "-qp".to_string(),
-                qp_str,
-            ]);
-        }
-        Encoder::X264 | Encoder::Auto => {
-            args.extend([
-                "-c:v".to_string(),
-                "libx264".to_string(),
-                "-preset".to_string(),
-                config.preset.clone(),
-                "-crf".to_string(),
-                qp_str,
-                "-pix_fmt".to_string(),
-                "yuv444p".to_string(),
-            ]);
-        }
-    }
-
-    // Output
-    args.extend(["-y".to_string(), video_path.to_str().unwrap().to_string()]);
-
-    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let mut ffmpeg = Command::new("ffmpeg")
-        .args(&args_ref)
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::ScreenshotFailed(format!("Failed to start ffmpeg: {}", e)))?;
-
-    let ffmpeg_stdin = ffmpeg.stdin.take().unwrap();
-    let mut ffmpeg_writer = BufWriter::with_capacity(8 * 1024 * 1024, ffmpeg_stdin);
-
-    let running = Arc::new(AtomicBool::new(true));
-
-    // Start input monitoring thread
-    let input_running = running.clone();
-    let input_events_clone = input_events.clone();
-    thread::spawn(move || {
-        monitor_input_stream(device, input_events_clone, input_running);
-    });
-
-    // Main capture loop
-    println!("Starting recording... Press Ctrl+C to stop.");
-
-    let mut frame_idx = 0;
-    let started_at = std::time::Instant::now();
-    let mut next_frame_at = started_at;
-    let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
-    let stats_every = config.stats_interval.map(Duration::from_secs);
-    let mut last_stats_at = started_at;
-    let mut captured_frames = 0u64;
-    let mut dropped_frames = 0u64;
-    let mut slow_frames = 0u64;
-
-    // Pre-allocate frame buffer to avoid allocations in hot loop
-    let expected_len = (width * height * 4) as usize;
-    let mut frame_buffer = vec![0u8; expected_len];
-
-    // Handle Ctrl+C
-    let running_ctrlc = running.clone();
-    ctrlc::set_handler(move || {
-        println!("\nStopping recording...");
-        running_ctrlc.store(false, Ordering::SeqCst);
-    })
-    .map_err(|e| Error::ScreenshotFailed(format!("Failed to set Ctrl+C handler: {}", e)))?;
-
-    while running.load(Ordering::SeqCst) {
-        if let Some(limit) = config.max_seconds {
-            if started_at.elapsed().as_secs() >= limit {
-                println!("Reached max_seconds={}, stopping...", limit);
-                running.store(false, Ordering::SeqCst);
-                break;
-            }
-        }
-
-        let now = std::time::Instant::now();
-        if now < next_frame_at {
-            thread::sleep(next_frame_at - now);
-        }
-        if now > next_frame_at + frame_interval {
-            dropped_frames += 1;
-        }
-        next_frame_at += frame_interval;
-
-        let frame = match pending_frame.take() {
-            Some(frame) => frame,
-            None => match capture.next_frame(Duration::from_millis(2000)) {
-                Ok(frame) => frame,
-                Err(e) => {
-                    eprintln!("Capture failed: {}", e);
-                    break;
-                }
-            },
-        };
-
-        // Copy frame data into pre-allocated buffer, avoiding allocation
-        let rgba = &frame.rgba;
-        let copy_len = rgba.len().min(expected_len);
-        frame_buffer[..copy_len].copy_from_slice(&rgba[..copy_len]);
-        if copy_len < expected_len {
-            frame_buffer[copy_len..].fill(0);
-        }
-
-        let encode_start = std::time::Instant::now();
-        if let Err(e) = ffmpeg_writer.write_all(&frame_buffer) {
-            eprintln!("Failed to write to ffmpeg (pipe closed?): {}", e);
-            break;
-        }
-        if encode_start.elapsed() > frame_interval {
-            slow_frames += 1;
-        }
-        captured_frames += 1;
-
-        let timing = FrameTiming {
-            frame_idx,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
-        };
-        if let Ok(mut timings) = frame_timings.lock() {
-            timings.push(timing);
-        }
-
-        frame_idx += 1;
-
-        if let Some(interval) = stats_every {
-            if last_stats_at.elapsed() >= interval {
-                let elapsed = started_at.elapsed().as_secs_f32();
-                let fps_actual = if elapsed > 0.0 {
-                    captured_frames as f32 / elapsed
-                } else {
-                    0.0
-                };
-                if let Some(file) = stats_file.as_mut() {
-                    let record = serde_json::json!({
-                        "timestamp": SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis(),
-                        "frames": captured_frames,
-                        "fps": fps_actual,
-                        "dropped": dropped_frames,
-                        "slow_writes": slow_frames,
-                    });
-                    let _ = writeln!(file, "{}", record);
-                }
-                last_stats_at = std::time::Instant::now();
-            }
-        }
-    }
-
-    // Cleanup - flush buffered writes before closing
-    if let Err(e) = ffmpeg_writer.flush() {
-        eprintln!("Warning: failed to flush ffmpeg buffer: {}", e);
-    }
-    drop(ffmpeg_writer);
-    println!("Waiting for encoding to finish...");
-    let _ = ffmpeg.wait();
-
-    // Write parquet files
-    println!("Writing parquet files...");
-    let frames = frame_timings.lock().unwrap();
-    if let Err(e) = write_frames_parquet(&session_dir.join("frames.parquet"), &frames) {
-        eprintln!("Failed to write frames.parquet: {}", e);
-    }
-    drop(frames);
-
-    let events = input_events.lock().unwrap();
-    if let Err(e) = write_inputs_parquet(&session_dir.join("inputs.parquet"), &events) {
-        eprintln!("Failed to write inputs.parquet: {}", e);
-    }
-    drop(events);
-
-    println!("Recording saved to {}", session_dir.display());
-    println!("Total Frames: {}", frame_idx);
-
-    Ok(())
+    Ok((writer, width, height, pipewire_format, pending_frame))
 }
 
-fn monitor_input_stream(
-    mut device: Device,
-    events_buffer: Arc<Mutex<Vec<EventRecord>>>,
-    running: Arc<AtomicBool>,
-) {
-    while running.load(Ordering::Relaxed) {
-        match device.fetch_events() {
-            Ok(events) => {
-                for event in events {
-                    if event.event_type() == evdev::EventType::KEY {
-                        let val = event.value();
-                        let state = match val {
-                            0 => "up",
-                            1 => "down",
-                            2 => "repeat",
-                            _ => "unknown",
-                        };
-
-                        let key = Key::new(event.code());
-                        let record = EventRecord {
-                            timestamp: SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis(),
-                            key_code: event.code(),
-                            key_name: format!("{:?}", key),
-                            state,
-                        };
-
-                        if let Ok(mut buf) = events_buffer.lock() {
-                            buf.push(record);
-                        }
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(1));
-            }
-            Err(_) => {
-                break;
-            }
-        }
-    }
+fn write_recorder_outputs(session_dir: &Path, summary: &RecorderSummary) {
+    write_summary_outputs(session_dir, summary);
 }
 
 fn select_device() -> anyhow::Result<Device> {

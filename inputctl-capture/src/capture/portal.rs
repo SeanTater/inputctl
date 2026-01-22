@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::primitives::frame_ops::{copy_frame, crop_rgba, non_black_bounds};
 use crate::primitives::screen::Region;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType, Stream};
 use ashpd::desktop::PersistMode;
@@ -154,6 +155,12 @@ impl Drop for PortalCapture {
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+impl crate::capture::FrameSource for PortalCapture {
+    fn next_frame(&mut self, timeout: Duration) -> Result<CaptureFrame> {
+        PortalCapture::next_frame(self, timeout)
     }
 }
 
@@ -360,79 +367,6 @@ fn build_sample(
     })
 }
 
-fn copy_frame(
-    raw: &mut [u8],
-    width: u32,
-    height: u32,
-    offset: u32,
-    stride: i32,
-    chunk_size: u32,
-    bytes_per_pixel: usize,
-    warned_stride: &mut bool,
-) -> Option<Vec<u8>> {
-    let row_bytes = width as usize * bytes_per_pixel;
-    if row_bytes == 0 || height == 0 {
-        return None;
-    }
-
-    let stride = if stride == 0 {
-        row_bytes as i32
-    } else {
-        stride
-    };
-    let stride_abs = stride.unsigned_abs() as usize;
-    if stride_abs < row_bytes {
-        if !*warned_stride {
-            eprintln!(
-                "PipeWire stride {} smaller than row bytes {}",
-                stride_abs, row_bytes
-            );
-            *warned_stride = true;
-        }
-        return None;
-    }
-
-    let offset = offset as usize;
-    if offset >= raw.len() {
-        return None;
-    }
-
-    let limit = if chunk_size == 0 {
-        raw.len()
-    } else {
-        offset.saturating_add(chunk_size as usize).min(raw.len())
-    };
-
-    let mut out = vec![0u8; row_bytes * height as usize];
-
-    if stride == row_bytes as i32 {
-        let needed = row_bytes * height as usize;
-        let end = offset.saturating_add(needed);
-        if end > limit {
-            return None;
-        }
-        out.copy_from_slice(&raw[offset..end]);
-        return Some(out);
-    }
-
-    for row in 0..height as usize {
-        let src_row = if stride > 0 {
-            row
-        } else {
-            height as usize - 1 - row
-        };
-        let src_start = offset + src_row * stride_abs;
-        let src_end = src_start + row_bytes;
-        if src_end > limit {
-            return None;
-        }
-        let dst_start = row * row_bytes;
-        out[dst_start..dst_start + row_bytes].copy_from_slice(&raw[src_start..src_end]);
-    }
-
-    Some(out)
-}
-
 fn build_format_params() -> Result<Vec<u8>> {
     let obj = spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
@@ -526,90 +460,6 @@ fn bytes_per_pixel(format: VideoFormat) -> Option<usize> {
         | VideoFormat::ABGR => Some(4),
         _ => None,
     }
-}
-
-fn crop_rgba(rgba: &[u8], width: u32, height: u32, region: Option<Region>) -> Result<Vec<u8>> {
-    let region = match region {
-        Some(region) => region,
-        None => return Ok(rgba.to_vec()),
-    };
-
-    if region.x < 0
-        || region.y < 0
-        || region.x as u32 + region.width > width
-        || region.y as u32 + region.height > height
-    {
-        return Ok(rgba.to_vec());
-    }
-
-    let crop_x = region.x as u32;
-    let crop_y = region.y as u32;
-    let crop_w = region.width;
-    let crop_h = region.height;
-
-    let mut out = vec![0u8; (crop_w * crop_h * 4) as usize];
-    let src_stride = (width * 4) as usize;
-    let dst_stride = (crop_w * 4) as usize;
-
-    for row in 0..crop_h {
-        let src_start = ((crop_y + row) as usize * src_stride) + (crop_x * 4) as usize;
-        let src_end = src_start + dst_stride;
-        let dst_start = (row as usize) * dst_stride;
-        out[dst_start..dst_start + dst_stride].copy_from_slice(&rgba[src_start..src_end]);
-    }
-
-    Ok(out)
-}
-
-fn non_black_bounds(rgba: &[u8], width: u32, height: u32) -> Option<Region> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-
-    let mut min_x = width;
-    let mut min_y = height;
-    let mut max_x = 0u32;
-    let mut max_y = 0u32;
-    let mut found = false;
-
-    let row_stride = (width * 4) as usize;
-    for y in 0..height {
-        let row_start = (y as usize) * row_stride;
-        for x in 0..width {
-            let idx = row_start + (x as usize * 4);
-            let r = rgba.get(idx).copied().unwrap_or(0);
-            let g = rgba.get(idx + 1).copied().unwrap_or(0);
-            let b = rgba.get(idx + 2).copied().unwrap_or(0);
-            if r == 0 && g == 0 && b == 0 {
-                continue;
-            }
-
-            found = true;
-            if x < min_x {
-                min_x = x;
-            }
-            if y < min_y {
-                min_y = y;
-            }
-            if x > max_x {
-                max_x = x;
-            }
-            if y > max_y {
-                max_y = y;
-            }
-        }
-    }
-
-    if !found {
-        return None;
-    }
-
-    Some(Region {
-        x: min_x as i32,
-        y: min_y as i32,
-        width: max_x - min_x + 1,
-        height: max_y - min_y + 1,
-    })
 }
 
 async fn open_portal(window_hint: Option<&str>) -> Result<(Stream, OwnedFd)> {

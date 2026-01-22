@@ -1,9 +1,9 @@
+use crate::capture::FrameSource;
 use crate::error::{Error, Result};
 use crate::primitives::grid::{draw_cursor_mark, CursorPos};
 use crate::primitives::screen::Region;
 use image::{ImageBuffer, ImageFormat, RgbaImage};
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// Options for screenshot capture
@@ -52,11 +52,53 @@ pub fn capture_screenshot(options: ScreenshotOptions) -> Result<ScreenshotData> 
     })
 }
 
+pub fn capture_screenshot_with_source_default_timeout(
+    source: &mut dyn FrameSource,
+    options: ScreenshotOptions,
+) -> Result<ScreenshotData> {
+    capture_screenshot_with_source(source, options, Duration::from_secs(2))
+}
+
 /// Internal helper: Capture screenshot logic returning RgbaImage
 /// Useful for raw access (recorder, etc.)
 pub fn capture_screenshot_image(options: ScreenshotOptions) -> Result<RgbaImage> {
     let frame = capture_raw_frame(Duration::from_secs(2))?;
-    let mut img = ImageBuffer::from_raw(frame.width, frame.height, frame.rgba)
+    screenshot_from_frame(&frame, options)
+}
+
+pub fn capture_screenshot_image_with_source(
+    source: &mut dyn FrameSource,
+    options: ScreenshotOptions,
+    timeout: Duration,
+) -> Result<RgbaImage> {
+    let frame = source.next_frame(timeout)?;
+    screenshot_from_frame(&frame, options)
+}
+
+pub fn capture_screenshot_with_source(
+    source: &mut dyn FrameSource,
+    options: ScreenshotOptions,
+    timeout: Duration,
+) -> Result<ScreenshotData> {
+    let img = capture_screenshot_image_with_source(source, options, timeout)?;
+
+    let mut png_bytes = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
+        .map_err(|e| Error::ScreenshotFailed(format!("PNG encoding failed: {}", e)))?;
+
+    Ok(ScreenshotData {
+        png_bytes,
+        width: img.width(),
+        height: img.height(),
+        cursor_pos: None,
+    })
+}
+
+fn screenshot_from_frame(
+    frame: &crate::capture::CaptureFrame,
+    options: ScreenshotOptions,
+) -> Result<RgbaImage> {
+    let mut img = ImageBuffer::from_raw(frame.width, frame.height, frame.rgba.clone())
         .ok_or_else(|| Error::ScreenshotFailed("Failed to create image buffer".into()))?;
 
     // Resize to logical dimensions if requested
@@ -135,6 +177,21 @@ pub fn capture_screenshot_image(options: ScreenshotOptions) -> Result<RgbaImage>
 pub fn capture_screenshot_raw(_width: u32, _height: u32) -> Result<Vec<u8>> {
     let frame = capture_raw_frame(Duration::from_secs(2))?;
     Ok(frame.rgba)
+}
+
+pub fn capture_screenshot_raw_with_source(
+    source: &mut dyn FrameSource,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    let frame = source.next_frame(timeout)?;
+    Ok(frame.rgba)
+}
+
+pub fn capture_raw_frame_with_source(
+    source: &mut dyn FrameSource,
+    timeout: Duration,
+) -> Result<crate::capture::CaptureFrame> {
+    source.next_frame(timeout)
 }
 
 /// Capture raw screenshot (RGBA8) with cropping

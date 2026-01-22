@@ -17,20 +17,14 @@ from .gpu_matching import GPUTemplateMatcher, GPUVideoScanner
 # Keywords indicating an enemy has been attacked/killed
 ATTACKED_KEYWORDS = (
     "stomp",
-    "stomped",
     "flat",
-    "flatten",
-    "melting",
+    "melt",
     "dead",
-    "die",
     "squash",
-    "squished",
     "squish",
     "hurt",
     "hit",
     "kill",
-    "killed",
-    "crush",
     "burn",
     "explode",
     "boom",
@@ -57,9 +51,8 @@ class EventDetector:
     def __init__(
         self,
         base_dir: str = "/usr/share/games/supertux2/images",
-        sprite_scale: float = 0.5,
-        death_threshold: float = 0.75,
-        attack_threshold: float = 0.75,
+        death_threshold: float = 0.90,
+        attack_threshold: float = 0.96,
         win_key: str = "KEY_BACKSLASH",
         win_key_min_presses: int = 1,
         win_key_window_s: float = 2.0,
@@ -71,7 +64,6 @@ class EventDetector:
         death_min_gap: int = 30 * 5,  # five seconds
     ):
         self.base_dir = base_dir
-        self.sprite_scale = sprite_scale
         self.death_threshold = death_threshold
         self.attack_threshold = attack_threshold
         self.win_key = win_key
@@ -86,22 +78,19 @@ class EventDetector:
         self._matcher = GPUTemplateMatcher()
         self._scanner = GPUVideoScanner(
             matcher=self._matcher,
-            sprite_scale=sprite_scale,
             blank_frame_mean_threshold=blank_frame_mean_threshold,
             blank_frame_std_threshold=blank_frame_std_threshold,
         )
 
-        # Load templates
-        self.death_templates = self._matcher.load_templates(
-            self._find_death_sprites(), scale=sprite_scale
-        )
-        self.attacked_templates = self._matcher.load_templates(
-            self._find_attacked_sprites(), scale=sprite_scale
-        )
+        # Build template batches (scaling applied internally)
+        death_paths = self._find_death_sprites()
+        attacked_paths = self._find_attacked_sprites()
+        self.death_batch = self._matcher.build_batch(death_paths)
+        self.attacked_batch = self._matcher.build_batch(attacked_paths)
 
-        if not self.death_templates:
+        if self.death_batch.n_templates == 0:
             print(f"Warning: No death templates found in {base_dir}")
-        if not self.attacked_templates:
+        if self.attacked_batch.n_templates == 0:
             print(f"Warning: No attacked enemy templates found in {base_dir}")
 
     def _find_death_sprites(self) -> list[str]:
@@ -144,8 +133,8 @@ class EventDetector:
         try:
             frame_results = self._scanner.detect_events(
                 video_path,
-                self.death_templates,
-                self.attacked_templates,
+                self.death_batch,
+                self.attacked_batch,
                 self.death_threshold,
                 self.attack_threshold,
                 frame_stride=self.frame_stride,

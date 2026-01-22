@@ -83,7 +83,6 @@ Outputs per-session label files:
 
 Key knobs:
 
-- `--sprite_scale 0.5` (speed vs detail tradeoff)
 - `--sprite_threshold 0.85` (template match confidence)
 - `--event_stride 1` (scan every Nth frame for event detection)
 - `--attack_reward 0.1` (bonus for killing enemies)

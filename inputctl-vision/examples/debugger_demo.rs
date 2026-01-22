@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use tokio;
 use inputctl_vision::agent::Agent;
 use inputctl_vision::config::Config;
 use inputctl_vision::debugger::StateStore;
 use inputctl_vision::server::DebugServer;
+use std::sync::Arc;
+use tokio;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

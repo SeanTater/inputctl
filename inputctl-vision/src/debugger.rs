@@ -9,8 +9,8 @@
 //! of changes in real-time.
 
 use crate::llm::{Message, ToolDefinition};
-use inputctl_capture::Region;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use inputctl_capture::Region;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tokio::sync::broadcast;

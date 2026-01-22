@@ -10,7 +10,9 @@ pub mod screenshot;
 
 pub use cursor::find_cursor;
 pub use grid::CursorPos;
-pub use screen::{find_window, get_screen_dimensions, list_windows, Region, ScreenDimensions, Window};
+pub use screen::{
+    find_window, get_screen_dimensions, list_windows, Region, ScreenDimensions, Window,
+};
 pub use screenshot::{
     capture_screenshot, capture_screenshot_image, capture_screenshot_simple, ScreenshotOptions,
 };

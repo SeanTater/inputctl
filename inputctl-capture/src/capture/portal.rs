@@ -1,10 +1,12 @@
 use crate::error::{Error, Result};
+use crate::primitives::screen::Region;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType, Stream};
 use ashpd::desktop::PersistMode;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::os::fd::AsRawFd;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub struct CaptureFrame {
@@ -21,6 +23,8 @@ pub struct PortalCapture {
     height: u32,
     start_time: Instant,
     _stream: Stream,
+    alpha_region: Mutex<Option<Region>>,
+    debug_logged: OnceLock<()>,
 }
 
 impl PortalCapture {
@@ -101,6 +105,8 @@ impl PortalCapture {
             height,
             start_time: Instant::now(),
             _stream: stream,
+            alpha_region: Mutex::new(None),
+            debug_logged: OnceLock::new(),
         })
     }
 
@@ -125,14 +131,165 @@ impl PortalCapture {
             .unwrap_or((self.width, self.height));
 
         let timestamp_ms = self.start_time.elapsed().as_millis();
+        let detected_region = {
+            let mut cached = self
+                .alpha_region
+                .lock()
+                .map_err(|_| Error::ScreenshotFailed("Auto-crop lock poisoned".into()))?;
+            if cached.is_none() {
+                *cached = non_black_bounds(map.as_slice(), info.0, info.1);
+            }
+            *cached
+        };
+
+        if self.debug_logged.get().is_none() {
+            let _ = self.debug_logged.set(());
+            let (black_ratio, non_black_ratio) = frame_black_ratio(map.as_slice());
+            println!(
+                "Portal stream: frame={}x{}, stream_hint={}x{}, stream_pos={:?}, stream_size={:?}, auto_crop={:?}, black_ratio={:.4}, non_black_ratio={:.4}",
+                info.0,
+                info.1,
+                self.width,
+                self.height,
+                self._stream.position(),
+                self._stream.size(),
+                detected_region,
+                black_ratio,
+                non_black_ratio
+            );
+        }
+
+        let rgba = crop_rgba(map.as_slice(), info.0, info.1, detected_region)?;
+
+        let (width, height) = if let Some(region) = detected_region {
+            if region.x >= 0
+                && region.y >= 0
+                && region.x as u32 + region.width <= info.0
+                && region.y as u32 + region.height <= info.1
+            {
+                (region.width, region.height)
+            } else {
+                (info.0, info.1)
+            }
+        } else {
+            (info.0, info.1)
+        };
 
         Ok(CaptureFrame {
-            rgba: map.as_slice().to_vec(),
-            width: info.0,
-            height: info.1,
+            rgba,
+            width,
+            height,
             timestamp_ms,
         })
     }
+}
+
+fn crop_rgba(rgba: &[u8], width: u32, height: u32, region: Option<Region>) -> Result<Vec<u8>> {
+    let region = match region {
+        Some(region) => region,
+        None => return Ok(rgba.to_vec()),
+    };
+
+    if region.x < 0
+        || region.y < 0
+        || region.x as u32 + region.width > width
+        || region.y as u32 + region.height > height
+    {
+        return Ok(rgba.to_vec());
+    }
+
+    let crop_x = region.x as u32;
+    let crop_y = region.y as u32;
+    let crop_w = region.width;
+    let crop_h = region.height;
+
+    let mut out = vec![0u8; (crop_w * crop_h * 4) as usize];
+    let src_stride = (width * 4) as usize;
+    let dst_stride = (crop_w * 4) as usize;
+
+    for row in 0..crop_h {
+        let src_start = ((crop_y + row) as usize * src_stride) + (crop_x * 4) as usize;
+        let src_end = src_start + dst_stride;
+        let dst_start = (row as usize) * dst_stride;
+        out[dst_start..dst_start + dst_stride].copy_from_slice(&rgba[src_start..src_end]);
+    }
+
+    Ok(out)
+}
+
+fn non_black_bounds(rgba: &[u8], width: u32, height: u32) -> Option<Region> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+
+    let row_stride = (width * 4) as usize;
+    for y in 0..height {
+        let row_start = (y as usize) * row_stride;
+        for x in 0..width {
+            let idx = row_start + (x as usize * 4);
+            let r = rgba.get(idx).copied().unwrap_or(0);
+            let g = rgba.get(idx + 1).copied().unwrap_or(0);
+            let b = rgba.get(idx + 2).copied().unwrap_or(0);
+            if r == 0 && g == 0 && b == 0 {
+                continue;
+            }
+
+            found = true;
+            if x < min_x {
+                min_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+    }
+
+    if !found {
+        return None;
+    }
+
+    Some(Region {
+        x: min_x as i32,
+        y: min_y as i32,
+        width: max_x - min_x + 1,
+        height: max_y - min_y + 1,
+    })
+}
+
+fn frame_black_ratio(rgba: &[u8]) -> (f64, f64) {
+    if rgba.is_empty() {
+        return (0.0, 0.0);
+    }
+
+    let mut black = 0u64;
+    let mut total = 0u64;
+
+    for chunk in rgba.chunks_exact(4) {
+        total += 1;
+        if chunk[0] == 0 && chunk[1] == 0 && chunk[2] == 0 {
+            black += 1;
+        }
+    }
+
+    if total == 0 {
+        return (0.0, 0.0);
+    }
+
+    let black_ratio = black as f64 / total as f64;
+    let non_black_ratio = 1.0 - black_ratio;
+    (black_ratio, non_black_ratio)
 }
 
 fn gst_video_info(caps: &gst::CapsRef) -> Option<(u32, u32)> {

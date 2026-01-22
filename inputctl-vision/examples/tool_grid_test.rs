@@ -1,5 +1,5 @@
-use serde_json::json;
 use inputctl_vision::VisionCtl;
+use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1. Creating headless controller...");

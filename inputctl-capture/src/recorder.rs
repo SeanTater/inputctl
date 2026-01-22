@@ -35,7 +35,10 @@ struct FrameTiming {
     timestamp: u128,
 }
 
-fn write_frames_parquet(path: &PathBuf, frames: &[FrameTiming]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn write_frames_parquet(
+    path: &PathBuf,
+    frames: &[FrameTiming],
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let schema = Schema::new(vec![
         Field::new("frame_idx", DataType::Int64, false),
         Field::new("timestamp", DataType::Int64, false),
@@ -60,7 +63,10 @@ fn write_frames_parquet(path: &PathBuf, frames: &[FrameTiming]) -> std::result::
     Ok(())
 }
 
-fn write_inputs_parquet(path: &PathBuf, events: &[EventRecord]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn write_inputs_parquet(
+    path: &PathBuf,
+    events: &[EventRecord],
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let schema = Schema::new(vec![
         Field::new("timestamp", DataType::Int64, false),
         Field::new("event_type", DataType::Utf8, false),
@@ -73,7 +79,10 @@ fn write_inputs_parquet(path: &PathBuf, events: &[EventRecord]) -> std::result::
 
     let timestamps: Vec<i64> = events.iter().map(|e| e.timestamp as i64).collect();
     let event_types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
-    let key_codes: Vec<Option<i32>> = events.iter().map(|e| e.key_code.map(|k| k as i32)).collect();
+    let key_codes: Vec<Option<i32>> = events
+        .iter()
+        .map(|e| e.key_code.map(|k| k as i32))
+        .collect();
     let key_names: Vec<Option<&str>> = events.iter().map(|e| e.key_name.as_deref()).collect();
     let states: Vec<Option<&str>> = events.iter().map(|e| e.state.as_deref()).collect();
     let xs: Vec<Option<i32>> = events.iter().map(|e| e.x).collect();
@@ -121,7 +130,7 @@ pub fn run_recorder(
     // If window is specified, find it. If region is specified, use it. Else full screen.
     // Note: If both, window takes precedence? Or intersection? Let's say window takes precedence.
 
-    let target_region = if let Some(r) = region_hint {
+    let _target_region = if let Some(r) = region_hint {
         println!("Targeting region: {:?}", r);
         Some(r)
     } else {
@@ -181,12 +190,17 @@ pub fn run_recorder(
 
     // 5. Start portal capture and determine dimensions from first frame
     let capture = crate::capture::PortalCapture::connect(None)?;
-    let first_frame = capture
-        .next_frame(Duration::from_millis(2000))
-        .map_err(|e| Error::ScreenshotFailed(format!("Capture failed: {}", e)))?;
+    let mut pending_frame = Some(
+        capture
+            .next_frame(Duration::from_millis(2000))
+            .map_err(|e| Error::ScreenshotFailed(format!("Capture failed: {}", e)))?,
+    );
 
-    let mut width = first_frame.width;
-    let mut height = first_frame.height;
+    let mut width = pending_frame.as_ref().map(|frame| frame.width).unwrap_or(0);
+    let mut height = pending_frame
+        .as_ref()
+        .map(|frame| frame.height)
+        .unwrap_or(0);
 
     // Ensure even dimensions for yuv420p
     if width % 2 != 0 {
@@ -196,14 +210,24 @@ pub fn run_recorder(
         height -= 1;
     }
 
-    // We might need to adjust the actual crop region to match these even dimensions if we changed them.
-    let _final_region = if let Some(mut r) = target_region {
-        r.width = width;
-        r.height = height;
-        Some(r)
-    } else {
-        None
-    };
+    // Trim the first frame to even dimensions if needed.
+    if let Some(frame) = pending_frame.take() {
+        if frame.width == width && frame.height == height {
+            pending_frame = Some(frame);
+        } else if frame.width >= width && frame.height >= height {
+            let even_len = (width * height * 4) as usize;
+            if frame.rgba.len() >= even_len {
+                let mut rgba = frame.rgba;
+                rgba.truncate(even_len);
+                pending_frame = Some(crate::capture::CaptureFrame {
+                    rgba,
+                    width,
+                    height,
+                    timestamp_ms: frame.timestamp_ms,
+                });
+            }
+        }
+    }
 
     println!("Recording dimensions: {}x{}", width, height);
     let video_path = session_dir.join("recording.mp4");
@@ -269,8 +293,6 @@ pub fn run_recorder(
         running_ctrlc.store(false, Ordering::SeqCst);
     })
     .map_err(|e| Error::ScreenshotFailed(format!("Failed to set Ctrl+C handler: {}", e)))?;
-
-    let mut pending_frame = Some(first_frame);
 
     while running.load(Ordering::SeqCst) {
         if let Some(limit) = max_seconds {

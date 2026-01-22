@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use dialoguer::{Input, Select};
-use inputctl_vision::{Agent, Config, LlmConfig, Region, VisionCtl};
+use inputctl_vision::{Agent, Config, Encoder, LlmConfig, RecorderConfig, Region, VisionCtl};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -105,17 +105,17 @@ enum Commands {
         #[arg(long, default_value = "ultrafast")]
         preset: String,
 
-        /// x264 CRF (higher = smaller, less CPU)
-        #[arg(long, default_value_t = 23)]
+        /// Quality (CRF for x264, QP for VAAPI). Higher = smaller files. 28 recommended for VAAPI.
+        #[arg(long, default_value_t = 28)]
         crf: u8,
 
         /// Input device path (optional, will prompt if not provided)
         #[arg(long)]
         device: Option<String>,
 
-        /// Limit recording to a specific region (x,y,w,h)
-        #[arg(long, value_parser = parse_region)]
-        region: Option<Region>,
+        /// Maximum output resolution (WxH, e.g., 1920x1080)
+        #[arg(long, value_parser = parse_resolution)]
+        max_resolution: Option<(u32, u32)>,
 
         /// Stop recording after this many seconds
         #[arg(long)]
@@ -124,6 +124,10 @@ enum Commands {
         /// Print performance stats every N seconds
         #[arg(long)]
         stats_interval: Option<u64>,
+
+        /// Video encoder: auto (prefer hw), x264 (software), vaapi (Intel/AMD hw)
+        #[arg(long, default_value = "auto")]
+        encoder: String,
     },
 }
 
@@ -148,6 +152,16 @@ fn parse_region(s: &str) -> Result<Region, String> {
         width: w,
         height: h,
     })
+}
+
+fn parse_resolution(s: &str) -> Result<(u32, u32), String> {
+    let parts: Vec<&str> = s.split('x').collect();
+    if parts.len() != 2 {
+        return Err("Resolution must be WxH (e.g., 1920x1080)".to_string());
+    }
+    let w = parts[0].parse().map_err(|_| "Invalid width".to_string())?;
+    let h = parts[1].parse().map_err(|_| "Invalid height".to_string())?;
+    Ok((w, h))
 }
 
 fn init_logging(verbose: u8, quiet: bool) {
@@ -215,19 +229,27 @@ fn main() -> inputctl_vision::Result<()> {
             preset,
             crf,
             device,
-            region,
+            max_resolution,
             max_seconds,
             stats_interval,
-        }) => Ok(inputctl_vision::run_recorder(
-            output,
-            fps,
-            preset,
-            crf,
-            device,
-            region,
-            max_seconds,
-            stats_interval,
-        )?),
+            encoder,
+        }) => {
+            let encoder = encoder.parse::<Encoder>().unwrap_or_else(|e| {
+                eprintln!("Warning: {}, using auto", e);
+                Encoder::Auto
+            });
+            Ok(inputctl_vision::run_recorder(RecorderConfig {
+                output_dir: output,
+                fps,
+                preset,
+                crf,
+                device_path: device,
+                max_seconds,
+                stats_interval,
+                max_resolution,
+                encoder,
+            })?)
+        }
         None => {
             // Default: query LLM with question
             let question = if cli.question.is_empty() {

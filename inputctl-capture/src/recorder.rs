@@ -1,5 +1,4 @@
 use crate::error::{Error, Result};
-use crate::primitives::screen::Region;
 use arrow::array::{Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -18,15 +17,33 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Configuration for the recorder.
+#[derive(Clone)]
+pub struct RecorderConfig {
+    /// Output directory for the dataset
+    pub output_dir: PathBuf,
+    /// Target recording FPS
+    pub fps: u64,
+    /// x264 preset (ultrafast, veryfast, fast, medium, etc.)
+    pub preset: String,
+    /// x264 CRF quality (0-51, lower = better quality, larger file)
+    pub crf: u8,
+    /// Input device path (if None, will prompt interactively)
+    pub device_path: Option<String>,
+    /// Stop recording after this many seconds
+    pub max_seconds: Option<u64>,
+    /// Print performance stats every N seconds
+    pub stats_interval: Option<u64>,
+    /// Maximum output resolution (width, height). Aspect ratio preserved.
+    pub max_resolution: Option<(u32, u32)>,
+}
+
 #[derive(Clone)]
 struct EventRecord {
     timestamp: u128,
-    event_type: String,
-    key_code: Option<u16>,
-    key_name: Option<String>,
-    state: Option<String>,
-    x: Option<i32>,
-    y: Option<i32>,
+    key_code: u16,
+    key_name: String,
+    state: &'static str,
 }
 
 #[derive(Clone)]
@@ -69,35 +86,23 @@ fn write_inputs_parquet(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let schema = Schema::new(vec![
         Field::new("timestamp", DataType::Int64, false),
-        Field::new("event_type", DataType::Utf8, false),
-        Field::new("key_code", DataType::Int32, true),
-        Field::new("key_name", DataType::Utf8, true),
-        Field::new("state", DataType::Utf8, true),
-        Field::new("x", DataType::Int32, true),
-        Field::new("y", DataType::Int32, true),
+        Field::new("key_code", DataType::Int32, false),
+        Field::new("key_name", DataType::Utf8, false),
+        Field::new("state", DataType::Utf8, false),
     ]);
 
     let timestamps: Vec<i64> = events.iter().map(|e| e.timestamp as i64).collect();
-    let event_types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
-    let key_codes: Vec<Option<i32>> = events
-        .iter()
-        .map(|e| e.key_code.map(|k| k as i32))
-        .collect();
-    let key_names: Vec<Option<&str>> = events.iter().map(|e| e.key_name.as_deref()).collect();
-    let states: Vec<Option<&str>> = events.iter().map(|e| e.state.as_deref()).collect();
-    let xs: Vec<Option<i32>> = events.iter().map(|e| e.x).collect();
-    let ys: Vec<Option<i32>> = events.iter().map(|e| e.y).collect();
+    let key_codes: Vec<i32> = events.iter().map(|e| e.key_code as i32).collect();
+    let key_names: Vec<&str> = events.iter().map(|e| e.key_name.as_str()).collect();
+    let states: Vec<&str> = events.iter().map(|e| e.state).collect();
 
     let batch = RecordBatch::try_new(
         Arc::new(schema.clone()),
         vec![
             Arc::new(Int64Array::from(timestamps)),
-            Arc::new(StringArray::from(event_types)),
             Arc::new(Int32Array::from(key_codes)),
             Arc::new(StringArray::from(key_names)),
             Arc::new(StringArray::from(states)),
-            Arc::new(Int32Array::from(xs)),
-            Arc::new(Int32Array::from(ys)),
         ],
     )?;
 
@@ -109,16 +114,7 @@ fn write_inputs_parquet(
     Ok(())
 }
 
-pub fn run_recorder(
-    output_dir: PathBuf,
-    fps: u64,
-    preset: String,
-    crf: u8,
-    device_path: Option<String>,
-    region_hint: Option<Region>,
-    max_seconds: Option<u64>,
-    stats_interval: Option<u64>,
-) -> Result<()> {
+pub fn run_recorder(config: RecorderConfig) -> Result<()> {
     // Check for ffmpeg
     if Command::new("ffmpeg").arg("-version").output().is_err() {
         return Err(Error::ScreenshotFailed(
@@ -126,20 +122,8 @@ pub fn run_recorder(
         ));
     }
 
-    // 1. Resolve Target Region
-    // If window is specified, find it. If region is specified, use it. Else full screen.
-    // Note: If both, window takes precedence? Or intersection? Let's say window takes precedence.
-
-    let _target_region = if let Some(r) = region_hint {
-        println!("Targeting region: {:?}", r);
-        Some(r)
-    } else {
-        println!("Targeting full screen (portal selection)");
-        None
-    };
-
-    // 2. Select Input Device
-    let device = if let Some(path) = device_path {
+    // Select input device
+    let device = if let Some(path) = config.device_path {
         Device::open(&path)
             .map_err(|e| Error::ScreenshotFailed(format!("Failed to open device: {}", e)))?
     } else {
@@ -161,9 +145,9 @@ pub fn run_recorder(
 
     println!("Selected device: {}", device.name().unwrap_or("Unknown"));
 
-    // 3. Prepare Output Directory
+    // Prepare output directory
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
-    let session_dir = output_dir.join(format!("run_{}", timestamp));
+    let session_dir = config.output_dir.join(format!("run_{}", timestamp));
 
     fs::create_dir_all(&session_dir).map_err(|e| {
         Error::ScreenshotFailed(format!("Failed to create output directory: {}", e))
@@ -174,7 +158,7 @@ pub fn run_recorder(
     let input_events: Arc<Mutex<Vec<EventRecord>>> = Arc::new(Mutex::new(Vec::new()));
     let frame_timings: Arc<Mutex<Vec<FrameTiming>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let mut stats_file = if stats_interval.is_some() {
+    let mut stats_file = if config.stats_interval.is_some() {
         Some(
             fs::OpenOptions::new()
                 .create(true)
@@ -188,7 +172,7 @@ pub fn run_recorder(
         None
     };
 
-    // 5. Start portal capture and determine dimensions from first frame
+    // Start portal capture and determine dimensions from first frame
     let capture = crate::capture::PortalCapture::connect(None)?;
     let mut pending_frame = Some(
         capture
@@ -202,7 +186,7 @@ pub fn run_recorder(
         .map(|frame| frame.height)
         .unwrap_or(0);
 
-    // Ensure even dimensions for yuv420p
+    // Ensure even dimensions for broader decoder compatibility
     if width % 2 != 0 {
         width -= 1;
     }
@@ -232,55 +216,69 @@ pub fn run_recorder(
     println!("Recording dimensions: {}x{}", width, height);
     let video_path = session_dir.join("recording.mp4");
 
+    // Build FFmpeg args, optionally adding a scale filter
+    let video_size = format!("{}x{}", width, height);
+    let fps_str = config.fps.to_string();
+    let crf_str = config.crf.to_string();
+    let video_path_str = video_path.to_str().unwrap();
+
+    // Scale filter: fit within max resolution, preserve aspect ratio, ensure even dimensions
+    let scale_filter = config.max_resolution.map(|(max_w, max_h)| {
+        format!(
+            "scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            max_w, max_h
+        )
+    });
+
+    if let Some(ref filter) = scale_filter {
+        println!("Output scale filter: {}", filter);
+    }
+
+    let mut args = vec![
+        "-f", "rawvideo",
+        "-pixel_format", "rgba",
+        "-video_size", &video_size,
+        "-framerate", &fps_str,
+        "-i", "-",
+    ];
+
+    if let Some(ref filter) = scale_filter {
+        args.extend(["-vf", filter.as_str()]);
+    }
+
+    args.extend([
+        "-c:v", "libx264",
+        "-preset", config.preset.as_str(),
+        "-crf", &crf_str,
+        "-pix_fmt", "yuv444p",
+        "-y", video_path_str,
+    ]);
+
     let mut ffmpeg = Command::new("ffmpeg")
-        .args([
-            "-f",
-            "rawvideo",
-            "-pixel_format",
-            "rgba", // VisionCtl returns RGBA8
-            "-video_size",
-            &format!("{}x{}", width, height),
-            "-framerate",
-            &fps.to_string(),
-            "-i",
-            "-", // Read from stdin
-            "-c:v",
-            "libx264",
-            "-preset",
-            preset.as_str(),
-            "-crf",
-            &crf.to_string(),
-            "-pix_fmt",
-            "yuv420p",
-            "-y",
-            video_path.to_str().unwrap(),
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| Error::ScreenshotFailed(format!("Failed to start ffmpeg: {}", e)))?;
 
     let mut ffmpeg_stdin = ffmpeg.stdin.take().unwrap();
 
-    // 6. Shared State
     let running = Arc::new(AtomicBool::new(true));
 
-    // 7. Start Threads
-    let _running_clone = running.clone();
-
+    // Start input monitoring thread
     let input_running = running.clone();
     let input_events_clone = input_events.clone();
     thread::spawn(move || {
         monitor_input_stream(device, input_events_clone, input_running);
     });
 
-    // 8. Main Rendering Loop (Frame Capture)
+    // Main capture loop
     println!("Starting recording... Press Ctrl+C to stop.");
 
     let mut frame_idx = 0;
     let started_at = std::time::Instant::now();
     let mut next_frame_at = started_at;
-    let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
-    let stats_every = stats_interval.map(Duration::from_secs);
+    let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
+    let stats_every = config.stats_interval.map(Duration::from_secs);
     let mut last_stats_at = started_at;
     let mut captured_frames = 0u64;
     let mut dropped_frames = 0u64;
@@ -295,7 +293,7 @@ pub fn run_recorder(
     .map_err(|e| Error::ScreenshotFailed(format!("Failed to set Ctrl+C handler: {}", e)))?;
 
     while running.load(Ordering::SeqCst) {
-        if let Some(limit) = max_seconds {
+        if let Some(limit) = config.max_seconds {
             if started_at.elapsed().as_secs() >= limit {
                 println!("Reached max_seconds={}, stopping...", limit);
                 running.store(false, Ordering::SeqCst);
@@ -375,7 +373,7 @@ pub fn run_recorder(
                         "dropped": dropped_frames,
                         "slow_writes": slow_frames,
                     });
-                    let _ = writeln!(file, "{}", record.to_string());
+                    let _ = writeln!(file, "{}", record);
                 }
                 last_stats_at = std::time::Instant::now();
             }
@@ -431,12 +429,9 @@ fn monitor_input_stream(
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap()
                                 .as_millis(),
-                            event_type: "key".to_string(),
-                            key_code: Some(event.code()),
-                            key_name: Some(format!("{:?}", key)),
-                            state: Some(state.to_string()),
-                            x: None,
-                            y: None,
+                            key_code: event.code(),
+                            key_name: format!("{:?}", key),
+                            state,
                         };
 
                         if let Ok(mut buf) = events_buffer.lock() {
@@ -456,9 +451,7 @@ fn monitor_input_stream(
 }
 
 fn select_device() -> anyhow::Result<Device> {
-    let mut devices = evdev::enumerate()
-        .map(|(path, dev)| (path, dev))
-        .collect::<Vec<_>>();
+    let mut devices: Vec<_> = evdev::enumerate().collect();
     devices.retain(|(_, dev)| dev.supported_events().contains(evdev::EventType::KEY));
     if devices.is_empty() {
         return Err(anyhow::anyhow!("No input devices found"));

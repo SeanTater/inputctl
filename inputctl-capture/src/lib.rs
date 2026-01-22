@@ -19,4 +19,4 @@ pub use primitives::{
     find_window, get_screen_dimensions, list_windows, CursorPos, Region, ScreenDimensions,
     ScreenshotOptions, Window,
 };
-pub use recorder::run_recorder;
+pub use recorder::{run_recorder, RecorderConfig};

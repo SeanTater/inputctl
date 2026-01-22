@@ -1,7 +1,7 @@
 //! Standalone recorder CLI for capturing supervised gameplay data.
 
 use clap::Parser;
-use inputctl_capture::{run_recorder, Region};
+use inputctl_capture::{run_recorder, RecorderConfig};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -18,7 +18,7 @@ struct Cli {
     fps: u64,
 
     /// x264 preset (lower CPU = faster presets)
-    #[arg(long, default_value = "ultrafast")]
+    #[arg(long, default_value = "veryfast")]
     preset: String,
 
     /// x264 CRF (higher = smaller, less CPU)
@@ -29,10 +29,6 @@ struct Cli {
     #[arg(long)]
     device: Option<String>,
 
-    /// Limit recording to a specific region (x,y,w,h)
-    #[arg(long, value_parser = parse_region)]
-    region: Option<Region>,
-
     /// Stop recording after this many seconds
     #[arg(long)]
     max_seconds: Option<u64>,
@@ -40,38 +36,41 @@ struct Cli {
     /// Print performance stats every N seconds
     #[arg(long)]
     stats_interval: Option<u64>,
+
+    /// Maximum output resolution (WxH), e.g. 1280x800. Aspect ratio preserved.
+    #[arg(long, default_value = "1280x800")]
+    max_resolution: String,
 }
 
-fn parse_region(s: &str) -> Result<Region, String> {
-    let parts: Vec<&str> = s.split(',').collect();
-    if parts.len() != 4 {
-        return Err("Region must be x,y,w,h".to_string());
+fn parse_max_resolution(s: &str) -> Option<(u32, u32)> {
+    if s.eq_ignore_ascii_case("none") {
+        return None;
     }
-    let x = parts[0].parse().map_err(|_| "Invalid x".to_string())?;
-    let y = parts[1].parse().map_err(|_| "Invalid y".to_string())?;
-    let w = parts[2].parse().map_err(|_| "Invalid w".to_string())?;
-    let h = parts[3].parse().map_err(|_| "Invalid h".to_string())?;
-    Ok(Region {
-        x,
-        y,
-        width: w,
-        height: h,
-    })
+    let parts: Vec<&str> = s.split('x').collect();
+    if parts.len() == 2 {
+        if let (Ok(w), Ok(h)) = (parts[0].parse(), parts[1].parse()) {
+            return Some((w, h));
+        }
+    }
+    eprintln!("Warning: Invalid max_resolution '{}', using no limit", s);
+    None
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    run_recorder(
-        cli.output,
-        cli.fps,
-        cli.preset,
-        cli.crf,
-        cli.device,
-        cli.region,
-        cli.max_seconds,
-        cli.stats_interval,
-    )?;
+    let config = RecorderConfig {
+        output_dir: cli.output,
+        fps: cli.fps,
+        preset: cli.preset,
+        crf: cli.crf,
+        device_path: cli.device,
+        max_seconds: cli.max_seconds,
+        stats_interval: cli.stats_interval,
+        max_resolution: parse_max_resolution(&cli.max_resolution),
+    };
+
+    run_recorder(config)?;
 
     Ok(())
 }

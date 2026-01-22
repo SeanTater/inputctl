@@ -57,8 +57,6 @@ inputctl-record --output dataset --fps 10
 ```bash
 # Install system dependencies (Ubuntu/Debian)
 sudo apt-get install -y \
-  gstreamer1.0-tools gstreamer1.0-plugins-{base,good,bad,ugly} \
-  gstreamer1.0-libav libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   xdg-desktop-portal
 
 # Install maturin
@@ -102,7 +100,7 @@ Screen capture and cursor tracking primitives.
 **Design:**
 - Portal-based capture works on any Wayland compositor
 - KWin cursor tracking (KDE Plasma only)
-- GStreamer pipeline for video processing
+- PipeWire stream processing for video capture
 
 **Binaries:** `inputctl-record` for training data capture
 

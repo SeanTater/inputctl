@@ -1,7 +1,7 @@
 //! inputctl-capture: Screen capture primitives for Linux (Wayland via xdg-desktop-portal)
 //!
 //! This crate provides low-level screen capture functionality:
-//! - Portal-based screenshot capture via PipeWire/GStreamer
+//! - Portal-based screenshot capture via PipeWire
 //! - KWin cursor position tracking
 //! - Screen/window geometry queries
 //! - Video recording with input capture for training data

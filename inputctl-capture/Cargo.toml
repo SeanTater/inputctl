@@ -16,8 +16,6 @@ thiserror.workspace = true
 
 # Portal/capture
 ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
-gstreamer = "0.24"
-gstreamer-app = "0.24"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 pipewire = "0.8"
 libspa = "0.8"

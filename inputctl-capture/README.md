@@ -5,7 +5,7 @@ Screen capture primitives for Linux (Wayland via xdg-desktop-portal).
 ## Features
 
 - **Portal-based capture** - Works on Wayland using xdg-desktop-portal
-- **GStreamer pipeline** - Efficient video processing
+- **PipeWire capture** - Direct portal streaming
 - **KWin cursor tracking** - Get cursor position via DBus (KDE Plasma)
 - **Recording** - Capture video + input events for training data
 
@@ -16,14 +16,12 @@ Screen capture primitives for Linux (Wayland via xdg-desktop-portal).
 Ubuntu/Debian:
 ```bash
 sudo apt-get install -y \
-  gstreamer1.0-tools gstreamer1.0-plugins-{base,good,bad,ugly} \
-  gstreamer1.0-libav libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   xdg-desktop-portal
 ```
 
 Arch:
 ```bash
-sudo pacman -S --needed gstreamer gst-plugins-{base,good,bad,ugly} gst-libav xdg-desktop-portal
+sudo pacman -S --needed xdg-desktop-portal
 ```
 
 ### Rust
@@ -166,7 +164,7 @@ Uses xdg-desktop-portal's ScreenCast interface:
 1. Creates a portal session
 2. Selects a screen source
 3. Starts a PipeWire stream
-4. Uses GStreamer to process frames
+4. Reads frames directly from PipeWire
 
 ### KWin Cursor (`primitives/cursor.rs`)
 
@@ -180,13 +178,13 @@ Gets cursor position via KWin's DBus interface:
 Combines portal capture with evdev input monitoring:
 - Captures frames at target FPS
 - Records keyboard/mouse events with timestamps
-- Encodes video using x264 via GStreamer
+- Encodes video using ffmpeg
 
 ## Platform Requirements
 
 - **Wayland** with xdg-desktop-portal
 - **KDE Plasma** for cursor position (optional but recommended)
-- **GStreamer** with x264 encoder for recording
+- **ffmpeg** for video encoding
 
 ## License
 

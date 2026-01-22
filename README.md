@@ -76,14 +76,12 @@ just train-custom EPOCHS=50 BATCH_SIZE=32 LR=1e-4
 Ubuntu/Debian:
 ```bash
 sudo apt-get install -y \
-  gstreamer1.0-tools gstreamer1.0-plugins-{base,good,bad,ugly} \
-  gstreamer1.0-libav libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   xdg-desktop-portal
 ```
 
 Arch:
 ```bash
-sudo pacman -S --needed gstreamer gst-plugins-{base,good,bad,ugly} gst-libav xdg-desktop-portal
+sudo pacman -S --needed xdg-desktop-portal
 ```
 
 ### Build

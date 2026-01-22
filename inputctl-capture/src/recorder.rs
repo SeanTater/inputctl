@@ -17,6 +17,31 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Video encoder selection.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Encoder {
+    /// Automatically select best available encoder (VAAPI > x264)
+    #[default]
+    Auto,
+    /// Software x264 encoder
+    X264,
+    /// Intel/AMD VAAPI hardware encoder
+    Vaapi,
+}
+
+impl std::str::FromStr for Encoder {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "auto" => Ok(Encoder::Auto),
+            "x264" | "software" | "sw" => Ok(Encoder::X264),
+            "vaapi" | "hw" | "hardware" => Ok(Encoder::Vaapi),
+            _ => Err(format!("Unknown encoder '{}'. Use: auto, x264, vaapi", s)),
+        }
+    }
+}
+
 /// Configuration for the recorder.
 #[derive(Clone)]
 pub struct RecorderConfig {
@@ -36,6 +61,8 @@ pub struct RecorderConfig {
     pub stats_interval: Option<u64>,
     /// Maximum output resolution (width, height). Aspect ratio preserved.
     pub max_resolution: Option<(u32, u32)>,
+    /// Encoder to use (auto, x264, vaapi)
+    pub encoder: Encoder,
 }
 
 #[derive(Clone)]
@@ -78,6 +105,58 @@ fn write_frames_parquet(
     writer.write(&batch)?;
     writer.close()?;
     Ok(())
+}
+
+/// Check if VAAPI H.264 encoding is available via ffmpeg.
+fn detect_vaapi() -> Option<String> {
+    // Check if render device exists
+    let render_device = "/dev/dri/renderD128";
+    if !std::path::Path::new(render_device).exists() {
+        return None;
+    }
+
+    // Test if ffmpeg can actually use VAAPI for H.264 encoding
+    // This runs a quick encode test with null output
+    let result = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel", "error",
+            "-vaapi_device", render_device,
+            "-f", "lavfi",
+            "-i", "color=black:s=64x64:d=0.1",
+            "-vf", "format=nv12,hwupload",
+            "-c:v", "h264_vaapi",
+            "-f", "null",
+            "-",
+        ])
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => Some(render_device.to_string()),
+        _ => None,
+    }
+}
+
+/// Resolve encoder choice, falling back if hardware unavailable.
+fn resolve_encoder(requested: &Encoder) -> (Encoder, Option<String>) {
+    match requested {
+        Encoder::Auto => {
+            if let Some(device) = detect_vaapi() {
+                (Encoder::Vaapi, Some(device))
+            } else {
+                (Encoder::X264, None)
+            }
+        }
+        Encoder::Vaapi => {
+            if let Some(device) = detect_vaapi() {
+                (Encoder::Vaapi, Some(device))
+            } else {
+                eprintln!("Warning: VAAPI not available, falling back to x264");
+                (Encoder::X264, None)
+            }
+        }
+        Encoder::X264 => (Encoder::X264, None),
+    }
 }
 
 fn write_inputs_parquet(
@@ -216,46 +295,100 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
     println!("Recording dimensions: {}x{}", width, height);
     let video_path = session_dir.join("recording.mp4");
 
-    // Build FFmpeg args, optionally adding a scale filter
+    // Resolve encoder choice
+    let (encoder, vaapi_device) = resolve_encoder(&config.encoder);
+    println!(
+        "Encoder: {:?}{}",
+        encoder,
+        vaapi_device
+            .as_ref()
+            .map(|d| format!(" ({})", d))
+            .unwrap_or_default()
+    );
+
+    // Build FFmpeg args based on encoder
     let video_size = format!("{}x{}", width, height);
     let fps_str = config.fps.to_string();
-    let crf_str = config.crf.to_string();
-    let video_path_str = video_path.to_str().unwrap();
+    let qp_str = config.crf.to_string(); // Used as QP for VAAPI, CRF for x264
 
-    // Scale filter: fit within max resolution, preserve aspect ratio, ensure even dimensions
-    let scale_filter = config.max_resolution.map(|(max_w, max_h)| {
-        format!(
-            "scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            max_w, max_h
-        )
-    });
+    // Build filter chain based on encoder and scaling needs
+    let filter = match (&encoder, &config.max_resolution) {
+        (Encoder::Vaapi, Some((max_w, max_h))) => {
+            // VAAPI: convert to nv12, upload to GPU, scale on GPU
+            format!(
+                "format=nv12,hwupload,scale_vaapi=w='min({},iw)':h='min({},ih)':force_original_aspect_ratio=decrease",
+                max_w, max_h
+            )
+        }
+        (Encoder::Vaapi, None) => {
+            // VAAPI: just convert and upload
+            "format=nv12,hwupload".to_string()
+        }
+        (_, Some((max_w, max_h))) => {
+            // x264 with scaling: CPU scale
+            format!(
+                "scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                max_w, max_h
+            )
+        }
+        _ => String::new(),
+    };
 
-    if let Some(ref filter) = scale_filter {
-        println!("Output scale filter: {}", filter);
+    if !filter.is_empty() {
+        println!("Filter: {}", filter);
     }
 
-    let mut args = vec![
-        "-f", "rawvideo",
-        "-pixel_format", "rgba",
-        "-video_size", &video_size,
-        "-framerate", &fps_str,
-        "-i", "-",
-    ];
+    let mut args: Vec<String> = Vec::new();
 
-    if let Some(ref filter) = scale_filter {
-        args.extend(["-vf", filter.as_str()]);
+    // VAAPI requires device init before input
+    if let Some(ref device) = vaapi_device {
+        args.extend([
+            "-vaapi_device".to_string(),
+            device.clone(),
+        ]);
     }
 
+    // Input specification
     args.extend([
-        "-c:v", "libx264",
-        "-preset", config.preset.as_str(),
-        "-crf", &crf_str,
-        "-pix_fmt", "yuv444p",
-        "-y", video_path_str,
+        "-f".to_string(), "rawvideo".to_string(),
+        "-pixel_format".to_string(), "rgba".to_string(),
+        "-video_size".to_string(), video_size,
+        "-framerate".to_string(), fps_str,
+        "-i".to_string(), "-".to_string(),
     ]);
 
+    // Filter chain
+    if !filter.is_empty() {
+        args.extend(["-vf".to_string(), filter]);
+    }
+
+    // Encoder-specific options
+    match encoder {
+        Encoder::Vaapi => {
+            args.extend([
+                "-c:v".to_string(), "h264_vaapi".to_string(),
+                "-qp".to_string(), qp_str,
+            ]);
+        }
+        Encoder::X264 | Encoder::Auto => {
+            args.extend([
+                "-c:v".to_string(), "libx264".to_string(),
+                "-preset".to_string(), config.preset.clone(),
+                "-crf".to_string(), qp_str,
+                "-pix_fmt".to_string(), "yuv444p".to_string(),
+            ]);
+        }
+    }
+
+    // Output
+    args.extend([
+        "-y".to_string(),
+        video_path.to_str().unwrap().to_string(),
+    ]);
+
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let mut ffmpeg = Command::new("ffmpeg")
-        .args(&args)
+        .args(&args_ref)
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| Error::ScreenshotFailed(format!("Failed to start ffmpeg: {}", e)))?;

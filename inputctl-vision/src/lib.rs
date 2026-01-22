@@ -35,8 +35,8 @@ pub use llm::{parse_coordinates, LlmConfig};
 // Re-export from inputctl-capture
 pub use inputctl_capture::{
     capture_screenshot, capture_screenshot_image, capture_screenshot_simple, find_cursor,
-    find_window, get_screen_dimensions, list_windows, run_recorder, CursorPos, Region,
-    ScreenDimensions, ScreenshotOptions, Window,
+    find_window, get_screen_dimensions, list_windows, run_recorder, CursorPos, Encoder,
+    RecorderConfig, Region, ScreenDimensions, ScreenshotOptions, Window,
 };
 
 use crate::debugger::{AgentObserver, NoopObserver};

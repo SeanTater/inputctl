@@ -2172,6 +2172,7 @@ dependencies = [
  "image",
  "imageproc",
  "libspa",
+ "nix 0.29.0",
  "parquet",
  "pipewire",
  "serde",

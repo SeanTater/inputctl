@@ -9,10 +9,12 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use dialoguer::{theme::ColorfulTheme, Select};
 use evdev::{Device, Key};
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::fs::{self, File};
 use std::io::{BufWriter, IsTerminal, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -182,6 +184,9 @@ struct EvdevInputSource {
 
 impl EvdevInputSource {
     fn new(device: Device) -> Self {
+        if let Err(e) = set_nonblocking(&device) {
+            eprintln!("Failed to set input device non-blocking: {}", e);
+        }
         Self { device }
     }
 }
@@ -189,7 +194,13 @@ impl EvdevInputSource {
 impl InputEventSource for EvdevInputSource {
     fn poll_events(&mut self) -> std::io::Result<Vec<InputEvent>> {
         let mut records = Vec::new();
-        let events = self.device.fetch_events()?;
+        let events = match self.device.fetch_events() {
+            Ok(events) => events,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(records);
+            }
+            Err(err) => return Err(err),
+        };
         for event in events {
             if event.event_type() == evdev::EventType::KEY {
                 let val = event.value();
@@ -214,6 +225,13 @@ impl InputEventSource for EvdevInputSource {
         }
         Ok(records)
     }
+}
+
+fn set_nonblocking(device: &Device) -> std::io::Result<()> {
+    let flags = OFlag::from_bits_truncate(fcntl(device.as_raw_fd(), FcntlArg::F_GETFL)?);
+    let new_flags = flags | OFlag::O_NONBLOCK;
+    fcntl(device.as_raw_fd(), FcntlArg::F_SETFL(new_flags))?;
+    Ok(())
 }
 
 pub(crate) fn write_frames_parquet(

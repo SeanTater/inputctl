@@ -7,6 +7,9 @@ pub enum Error {
     #[error("Screenshot failed: {0}")]
     ScreenshotFailed(String),
 
+    #[error("Capture timeout")]
+    CaptureTimeout,
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

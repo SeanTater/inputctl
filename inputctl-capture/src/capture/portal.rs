@@ -17,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::runtime;
 
+#[derive(Clone)]
 pub struct CaptureFrame {
     pub rgba: Vec<u8>,
     pub width: u32,
@@ -105,7 +106,7 @@ impl PortalCapture {
         let raw = self
             .frame_rx
             .recv_timeout(timeout)
-            .map_err(|_| Error::ScreenshotFailed("Timed out waiting for frame".into()))?;
+            .map_err(|_| Error::CaptureTimeout)?;
 
         let frame_width = raw.width;
         let frame_height = raw.height;
@@ -201,6 +202,8 @@ fn init_pipewire_capture(
             *pw::keys::MEDIA_TYPE => "Video",
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_ROLE => "Screen",
+            *pw::keys::NODE_ALWAYS_PROCESS => "true",
+            *pw::keys::NODE_PAUSE_ON_IDLE => "false",
         },
     )
     .map_err(map_pipewire_error)?;

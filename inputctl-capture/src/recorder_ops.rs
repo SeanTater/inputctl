@@ -95,6 +95,7 @@ pub fn run_capture_loop(
     let mut frame_buffer = vec![0u8; expected_len];
 
     let mut pending = pending_frame;
+    let mut have_frame = false;
 
     loop {
         if let Some(limit) = config.max_seconds {
@@ -115,9 +116,10 @@ pub fn run_capture_loop(
         next_frame_at += frame_interval;
 
         let frame = match pending.take() {
-            Some(frame) => frame,
-            None => match frame_source.next_frame(Duration::from_millis(2000)) {
-                Ok(frame) => frame,
+            Some(frame) => Some(frame),
+            None => match frame_source.next_frame(frame_interval) {
+                Ok(frame) => Some(frame),
+                Err(crate::error::Error::CaptureTimeout) => None,
                 Err(e) => {
                     eprintln!("Capture failed: {}", e);
                     break;
@@ -125,10 +127,15 @@ pub fn run_capture_loop(
             },
         };
 
-        let copy_len = frame.rgba.len().min(expected_len);
-        frame_buffer[..copy_len].copy_from_slice(&frame.rgba[..copy_len]);
-        if copy_len < expected_len {
-            frame_buffer[copy_len..].fill(0);
+        if let Some(frame) = frame {
+            let copy_len = frame.rgba.len().min(expected_len);
+            frame_buffer[..copy_len].copy_from_slice(&frame.rgba[..copy_len]);
+            if copy_len < expected_len {
+                frame_buffer[copy_len..].fill(0);
+            }
+            have_frame = true;
+        } else if !have_frame {
+            continue;
         }
 
         let encode_start = clock.now();

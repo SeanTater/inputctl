@@ -26,3 +26,4 @@ reflex_train/preds*.jsonl
 dataset/
 
 .claude
+profile.json.gz

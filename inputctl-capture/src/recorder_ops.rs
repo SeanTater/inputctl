@@ -127,19 +127,47 @@ pub fn run_capture_loop(
             },
         };
 
+        let mut frame_bytes = &frame_buffer[..];
         if let Some(frame) = frame {
+            if frame.rgba.len() == expected_len {
+                let encode_start = clock.now();
+                if let Err(e) = writer.write_frame(&frame.rgba) {
+                    eprintln!("Failed to write to encoder: {}", e);
+                    break;
+                }
+                if clock.now().duration_since(encode_start) > frame_interval {
+                    slow_frames += 1;
+                }
+                captured_frames += 1;
+                frames.push(FrameTiming {
+                    frame_idx,
+                    timestamp: clock.now_ms(),
+                });
+                frame_idx += 1;
+                have_frame = true;
+                match input_source.poll_events() {
+                    Ok(mut batch) => events.append(&mut batch),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        clock.sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => {}
+                }
+                continue;
+            }
+
             let copy_len = frame.rgba.len().min(expected_len);
             frame_buffer[..copy_len].copy_from_slice(&frame.rgba[..copy_len]);
             if copy_len < expected_len {
                 frame_buffer[copy_len..].fill(0);
             }
+            frame_bytes = &frame_buffer[..];
             have_frame = true;
         } else if !have_frame {
             continue;
         }
 
         let encode_start = clock.now();
-        if let Err(e) = writer.write_frame(&frame_buffer) {
+        if let Err(e) = writer.write_frame(frame_bytes) {
             eprintln!("Failed to write to encoder: {}", e);
             break;
         }

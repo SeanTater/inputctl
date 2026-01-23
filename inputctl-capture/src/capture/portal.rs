@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::primitives::frame_ops::{copy_frame, crop_rgba, non_black_bounds};
+use crate::primitives::frame_ops::{copy_frame, copy_frame_region, non_black_bounds_stride};
 use crate::primitives::screen::Region;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType, Stream};
 use ashpd::desktop::PersistMode;
@@ -12,7 +12,7 @@ use spa::pod::Pod;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::runtime;
@@ -43,6 +43,7 @@ struct UserData {
     warned_unsupported: bool,
     warned_no_data: bool,
     warned_stride: bool,
+    auto_crop_region: Option<Region>,
 }
 
 struct CaptureState {
@@ -59,7 +60,6 @@ pub struct PortalCapture {
     frame_rx: Receiver<RawSample>,
     running: Arc<AtomicBool>,
     thread_handle: Option<thread::JoinHandle<()>>,
-    auto_crop_region: Mutex<Option<Region>>,
 }
 
 impl PortalCapture {
@@ -98,7 +98,6 @@ impl PortalCapture {
             frame_rx,
             running,
             thread_handle: Some(thread_handle),
-            auto_crop_region: Mutex::new(None),
         })
     }
 
@@ -113,37 +112,11 @@ impl PortalCapture {
         let format = raw.format;
 
         let timestamp_ms = raw.timestamp_ms;
-        let auto_crop_region = {
-            let mut cached = self
-                .auto_crop_region
-                .lock()
-                .map_err(|_| Error::ScreenshotFailed("Auto-crop lock poisoned".into()))?;
-            if cached.is_none() {
-                *cached = non_black_bounds(&raw.data, frame_width, frame_height);
-            }
-            *cached
-        };
-
-        let rgba = crop_rgba(&raw.data, frame_width, frame_height, auto_crop_region)?;
-
-        let (width, height) = if let Some(region) = auto_crop_region {
-            if region.x >= 0
-                && region.y >= 0
-                && region.x as u32 + region.width <= frame_width
-                && region.y as u32 + region.height <= frame_height
-            {
-                (region.width, region.height)
-            } else {
-                (frame_width, frame_height)
-            }
-        } else {
-            (frame_width, frame_height)
-        };
 
         Ok(CaptureFrame {
-            rgba,
-            width,
-            height,
+            rgba: raw.data,
+            width: frame_width,
+            height: frame_height,
             timestamp_ms,
             format,
         })
@@ -219,6 +192,7 @@ fn init_pipewire_capture(
         warned_unsupported: false,
         warned_no_data: false,
         warned_stride: false,
+        auto_crop_region: None,
     };
 
     let _stream_listener = video_stream
@@ -350,21 +324,50 @@ fn build_sample(
         return None;
     };
 
-    let frame = copy_frame(
-        raw,
-        width,
-        height,
-        offset,
-        stride,
-        chunk_size,
-        user_data.bytes_per_pixel,
-        &mut user_data.warned_stride,
-    )?;
+    if user_data.auto_crop_region.is_none() {
+        user_data.auto_crop_region = non_black_bounds_stride(
+            raw,
+            width,
+            height,
+            offset,
+            stride,
+            chunk_size,
+            user_data.bytes_per_pixel,
+        );
+    }
+
+    let region = user_data.auto_crop_region;
+    let (frame, out_width, out_height) = if let Some(region) = region {
+        let frame = copy_frame_region(
+            raw,
+            width,
+            height,
+            offset,
+            stride,
+            chunk_size,
+            user_data.bytes_per_pixel,
+            Some(region),
+            &mut user_data.warned_stride,
+        )?;
+        (frame, region.width, region.height)
+    } else {
+        let frame = copy_frame(
+            raw,
+            width,
+            height,
+            offset,
+            stride,
+            chunk_size,
+            user_data.bytes_per_pixel,
+            &mut user_data.warned_stride,
+        )?;
+        (frame, width, height)
+    };
 
     Some(RawSample {
         data: frame,
-        width,
-        height,
+        width: out_width,
+        height: out_height,
         format: format_label.to_string(),
         timestamp_ms: start_time.elapsed().as_millis(),
     })

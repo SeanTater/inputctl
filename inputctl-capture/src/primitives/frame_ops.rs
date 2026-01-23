@@ -74,6 +74,85 @@ pub fn copy_frame(
     Some(out)
 }
 
+pub fn copy_frame_region(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    offset: u32,
+    stride: i32,
+    chunk_size: u32,
+    bytes_per_pixel: usize,
+    region: Option<Region>,
+    warned_stride: &mut bool,
+) -> Option<Vec<u8>> {
+    let region = match region {
+        Some(region)
+            if region.x >= 0
+                && region.y >= 0
+                && region.x as u32 + region.width <= width
+                && region.y as u32 + region.height <= height =>
+        {
+            region
+        }
+        _ => return None,
+    };
+
+    let row_bytes = region.width as usize * bytes_per_pixel;
+    if row_bytes == 0 || region.height == 0 {
+        return None;
+    }
+
+    let stride = if stride == 0 {
+        (width as usize * bytes_per_pixel) as i32
+    } else {
+        stride
+    };
+    let stride_abs = stride.unsigned_abs() as usize;
+    let full_row_bytes = width as usize * bytes_per_pixel;
+    if stride_abs < full_row_bytes {
+        if !*warned_stride {
+            eprintln!(
+                "PipeWire stride {} smaller than row bytes {}",
+                stride_abs, full_row_bytes
+            );
+            *warned_stride = true;
+        }
+        return None;
+    }
+
+    let offset = offset as usize;
+    if offset >= raw.len() {
+        return None;
+    }
+
+    let limit = if chunk_size == 0 {
+        raw.len()
+    } else {
+        offset.saturating_add(chunk_size as usize).min(raw.len())
+    };
+
+    let mut out = vec![0u8; row_bytes * region.height as usize];
+    let crop_x = region.x as usize;
+    let crop_y = region.y as usize;
+
+    for row in 0..region.height as usize {
+        let src_row = if stride > 0 {
+            crop_y + row
+        } else {
+            height as usize - 1 - (crop_y + row)
+        };
+        let src_start = offset + src_row * stride_abs + crop_x * bytes_per_pixel;
+        let src_end = src_start + row_bytes;
+        if src_end > limit {
+            return None;
+        }
+        let dst_start = row * row_bytes;
+        out[dst_start..dst_start + row_bytes].copy_from_slice(&raw[src_start..src_end]);
+    }
+
+    Some(out)
+}
+
 pub fn crop_rgba(rgba: &[u8], width: u32, height: u32, region: Option<Region>) -> Result<Vec<u8>> {
     let region = match region {
         Some(region) => region,
@@ -105,6 +184,99 @@ pub fn crop_rgba(rgba: &[u8], width: u32, height: u32, region: Option<Region>) -
     }
 
     Ok(out)
+}
+
+pub fn non_black_bounds_stride(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    offset: u32,
+    stride: i32,
+    chunk_size: u32,
+    bytes_per_pixel: usize,
+) -> Option<Region> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let row_bytes = width as usize * bytes_per_pixel;
+    let stride = if stride == 0 {
+        row_bytes as i32
+    } else {
+        stride
+    };
+    let stride_abs = stride.unsigned_abs() as usize;
+    if stride_abs < row_bytes {
+        return None;
+    }
+
+    let offset = offset as usize;
+    if offset >= raw.len() {
+        return None;
+    }
+
+    let limit = if chunk_size == 0 {
+        raw.len()
+    } else {
+        offset.saturating_add(chunk_size as usize).min(raw.len())
+    };
+
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+
+    for row in 0..height as usize {
+        let src_row = if stride > 0 {
+            row
+        } else {
+            height as usize - 1 - row
+        };
+        let row_start = offset + src_row * stride_abs;
+        let row_end = row_start + row_bytes;
+        if row_end > limit {
+            return None;
+        }
+        for x in 0..width as usize {
+            let idx = row_start + x * bytes_per_pixel;
+            if idx + 2 >= limit {
+                return None;
+            }
+            let r = raw[idx];
+            let g = raw[idx + 1];
+            let b = raw[idx + 2];
+            if r == 0 && g == 0 && b == 0 {
+                continue;
+            }
+            found = true;
+            let x_u32 = x as u32;
+            let y_u32 = row as u32;
+            if x_u32 < min_x {
+                min_x = x_u32;
+            }
+            if y_u32 < min_y {
+                min_y = y_u32;
+            }
+            if x_u32 > max_x {
+                max_x = x_u32;
+            }
+            if y_u32 > max_y {
+                max_y = y_u32;
+            }
+        }
+    }
+
+    if !found {
+        return None;
+    }
+
+    Some(Region {
+        x: min_x as i32,
+        y: min_y as i32,
+        width: max_x - min_x + 1,
+        height: max_y - min_y + 1,
+    })
 }
 
 pub fn non_black_bounds(rgba: &[u8], width: u32, height: u32) -> Option<Region> {

@@ -59,8 +59,6 @@ pub struct RecorderConfig {
     pub device_path: Option<String>,
     /// Stop recording after this many seconds
     pub max_seconds: Option<u64>,
-    /// Print performance stats every N seconds
-    pub stats_interval: Option<u64>,
     /// Maximum output resolution (width, height). Aspect ratio preserved.
     pub max_resolution: Option<(u32, u32)>,
     /// Encoder to use (auto, x264, vaapi)
@@ -123,7 +121,7 @@ pub trait VideoWriter {
 
 struct FfmpegWriter {
     process: std::process::Child,
-    writer: BufWriter<std::process::ChildStdin>,
+    writer: Option<BufWriter<std::process::ChildStdin>>,
 }
 
 impl FfmpegWriter {
@@ -140,25 +138,35 @@ impl FfmpegWriter {
             .take()
             .ok_or_else(|| Error::ScreenshotFailed("Failed to open ffmpeg stdin".to_string()))?;
         let writer = BufWriter::with_capacity(8 * 1024 * 1024, stdin);
-        Ok(Self { process, writer })
+        Ok(Self {
+            process,
+            writer: Some(writer),
+        })
     }
 }
 
 impl VideoWriter for FfmpegWriter {
     fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
-        self.writer.write_all(frame)
+        if let Some(writer) = self.writer.as_mut() {
+            writer.write_all(frame)
+        } else {
+            Ok(())
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
+        if let Some(writer) = self.writer.as_mut() {
+            writer.flush()
+        } else {
+            Ok(())
+        }
     }
 
     fn finish(&mut self) -> std::io::Result<()> {
-        self.writer.flush()?;
-        drop(std::mem::replace(
-            &mut self.writer,
-            BufWriter::new(std::io::sink()),
-        ));
+        if let Some(mut writer) = self.writer.take() {
+            writer.flush()?;
+            drop(writer);
+        }
         let _ = self.process.wait();
         Ok(())
     }
@@ -366,20 +374,6 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
     let mut input_source = EvdevInputSource::new(device);
     let mut clock = SystemClock;
 
-    let mut stats_file = if config.stats_interval.is_some() {
-        Some(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(session_dir.join("stats.jsonl"))
-                .map_err(|e| {
-                    Error::ScreenshotFailed(format!("Failed to create stats log: {}", e))
-                })?,
-        )
-    } else {
-        None
-    };
-
     let (mut writer, width, height, pipewire_format, mut pending_frame) =
         prepare_capture(&mut capture, &config, &session_dir)?;
     println!("Recording dimensions: {}x{}", width, height);
@@ -394,7 +388,6 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
         height,
         pipewire_format,
         pending_frame.take(),
-        stats_file.as_mut(),
     )?;
 
     write_recorder_outputs(&session_dir, &summary);
@@ -416,13 +409,7 @@ pub fn run_recorder_with_sources(
     height: u32,
     _pipewire_format: String,
     pending_frame: Option<CaptureFrame>,
-    stats_file: Option<&mut File>,
 ) -> Result<RecorderSummary> {
-    let mut stats = stats_file
-        .map(|s| s.try_clone())
-        .transpose()
-        .map_err(|e| Error::ScreenshotFailed(format!("Failed to clone stats file: {}", e)))?;
-
     let summary = run_capture_loop(
         config,
         frame_source,
@@ -432,7 +419,6 @@ pub fn run_recorder_with_sources(
         width,
         height,
         pending_frame,
-        &mut stats,
     )?;
 
     if let Err(e) = writer.flush() {

@@ -121,10 +121,6 @@ enum Commands {
         #[arg(long)]
         max_seconds: Option<u64>,
 
-        /// Print performance stats every N seconds
-        #[arg(long)]
-        stats_interval: Option<u64>,
-
         /// Video encoder: auto (prefer hw), x264 (software), vaapi (Intel/AMD hw)
         #[arg(long, default_value = "auto")]
         encoder: String,
@@ -231,7 +227,6 @@ fn main() -> inputctl_vision::Result<()> {
             device,
             max_resolution,
             max_seconds,
-            stats_interval,
             encoder,
         }) => {
             let encoder = encoder.parse::<Encoder>().unwrap_or_else(|e| {
@@ -245,7 +240,6 @@ fn main() -> inputctl_vision::Result<()> {
                 crf,
                 device_path: device,
                 max_seconds,
-                stats_interval,
                 max_resolution,
                 encoder,
             })?)

@@ -33,10 +33,6 @@ struct Cli {
     #[arg(long)]
     max_seconds: Option<u64>,
 
-    /// Print performance stats every N seconds
-    #[arg(long)]
-    stats_interval: Option<u64>,
-
     /// Maximum output resolution (WxH), e.g. 1280x800. Aspect ratio preserved.
     #[arg(long, default_value = "1280x800")]
     max_resolution: String,
@@ -75,7 +71,6 @@ fn main() -> anyhow::Result<()> {
         crf: cli.crf,
         device_path: cli.device,
         max_seconds: cli.max_seconds,
-        stats_interval: cli.stats_interval,
         max_resolution: parse_max_resolution(&cli.max_resolution),
         encoder,
     };

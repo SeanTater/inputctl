@@ -4,8 +4,6 @@ use crate::recorder::{
     write_frames_parquet, write_inputs_parquet, Clock, Encoder, FrameTiming, InputEvent,
     InputEventSource, RecorderConfig, RecorderSummary, VideoWriter,
 };
-use std::fs::File;
-use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -58,26 +56,6 @@ pub fn normalize_even_dimensions(
     )
 }
 
-pub(crate) fn maybe_write_stats(
-    stats: &mut Option<File>,
-    now_ms: u128,
-    frames: u64,
-    fps: f32,
-    dropped: u64,
-    slow: u64,
-) {
-    if let Some(file) = stats.as_mut() {
-        let record = serde_json::json!({
-            "timestamp": now_ms,
-            "frames": frames,
-            "fps": fps,
-            "dropped": dropped,
-            "slow_writes": slow,
-        });
-        let _ = writeln!(file, "{}", record);
-    }
-}
-
 pub(crate) fn write_summary_outputs(path: &Path, summary: &RecorderSummary) {
     let frames_path = path.join("frames.parquet");
     if let Err(e) = write_frames_parquet(&frames_path, &summary.frames) {
@@ -100,12 +78,9 @@ pub fn run_capture_loop(
     width: u32,
     height: u32,
     pending_frame: Option<crate::capture::CaptureFrame>,
-    stats: &mut Option<File>,
 ) -> Result<RecorderSummary> {
     let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
-    let stats_every = config.stats_interval.map(Duration::from_secs);
     let started_at = clock.now();
-    let mut last_stats_at = started_at;
 
     let mut frame_idx = 0;
     let mut next_frame_at = started_at;
@@ -178,27 +153,6 @@ pub fn run_capture_loop(
                 clock.sleep(Duration::from_millis(1));
             }
             Err(_) => {}
-        }
-
-        if let Some(interval) = stats_every {
-            let last_elapsed = clock.now().duration_since(last_stats_at);
-            if last_elapsed >= interval {
-                let elapsed = clock.now().duration_since(started_at).as_secs_f32();
-                let fps_actual = if elapsed > 0.0 {
-                    captured_frames as f32 / elapsed
-                } else {
-                    0.0
-                };
-                maybe_write_stats(
-                    stats,
-                    clock.now_ms(),
-                    captured_frames,
-                    fps_actual,
-                    dropped_frames,
-                    slow_frames,
-                );
-                last_stats_at = clock.now();
-            }
         }
     }
 

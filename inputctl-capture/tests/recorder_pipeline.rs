@@ -107,7 +107,6 @@ fn recorder_pipeline_collects_rows() {
         crf: 28,
         device_path: None,
         max_seconds: Some(1),
-        stats_interval: None,
         max_resolution: None,
         encoder: Encoder::X264,
     };
@@ -148,7 +147,6 @@ fn recorder_pipeline_collects_rows() {
         1,
         1,
         "BGRx".to_string(),
-        None,
         None,
     )
     .expect("summary");

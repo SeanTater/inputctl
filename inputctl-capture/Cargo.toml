@@ -11,6 +11,13 @@ crate-type = ["cdylib", "rlib"]
 name = "inputctl-record"
 path = "src/bin/record.rs"
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "screenshot_ops"
+harness = false
+
 [dependencies]
 thiserror.workspace = true
 
@@ -27,6 +34,7 @@ zvariant = "5.2"
 # Image processing
 image = "0.25"
 imageproc = "0.25"
+fast_image_resize = "6"
 ab_glyph = "0.2"
 tempfile = "3.14"
 tracing = "0.1"

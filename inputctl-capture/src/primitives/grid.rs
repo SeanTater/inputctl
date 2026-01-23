@@ -60,26 +60,4 @@ pub fn draw_cursor_mark(image: &mut RgbaImage, pos: &CursorPos) {
             }
         }
     }
-
-    // Draw a circle around cursor for extra visibility
-    let radius = 20u32;
-    for angle in 0..360 {
-        let rad = (angle as f32) * std::f32::consts::PI / 180.0;
-        let cx = x as i32 + (radius as f32 * rad.cos()) as i32;
-        let cy = y as i32 + (radius as f32 * rad.sin()) as i32;
-        if cx >= 0 && cy >= 0 {
-            // White outline
-            if let Some(pixel) = image.get_pixel_mut_checked(cx as u32, cy as u32) {
-                *pixel = outline_color;
-            }
-            // Red inner
-            let cx2 = x as i32 + ((radius - 1) as f32 * rad.cos()) as i32;
-            let cy2 = y as i32 + ((radius - 1) as f32 * rad.sin()) as i32;
-            if cx2 >= 0 && cy2 >= 0 {
-                if let Some(pixel) = image.get_pixel_mut_checked(cx2 as u32, cy2 as u32) {
-                    *pixel = mark_color;
-                }
-            }
-        }
-    }
 }

@@ -32,16 +32,44 @@ pub use config::{Config, CursorSettings, LlmSettings};
 pub use detection::Detection;
 pub use llm::{parse_coordinates, LlmConfig};
 
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
+static PIPEWIRE_CAPTURE: OnceLock<Mutex<PortalCapture>> = OnceLock::new();
+
+fn pipewire_capture() -> Result<std::sync::MutexGuard<'static, PortalCapture>> {
+    let capture = PIPEWIRE_CAPTURE.get_or_init(|| {
+        Mutex::new(
+            PortalCapture::connect(None)
+                .unwrap_or_else(|err| panic!("PipeWire capture init failed: {}", err)),
+        )
+    });
+    capture
+        .lock()
+        .map_err(|_| Error::ScreenshotFailed("PipeWire capture lock poisoned".into()))
+}
+
+pub(crate) fn capture_with_options(options: ScreenshotOptions) -> Result<ScreenshotData> {
+    let mut capture = pipewire_capture()?;
+    Ok(capture_screenshot_with_source(
+        &mut *capture,
+        options,
+        CAPTURE_TIMEOUT,
+    )?)
+}
+
 // Re-export from inputctl-capture
+use inputctl_capture::{
+    capture_screenshot_image_with_source, capture_screenshot_raw_with_source,
+    capture_screenshot_with_source, PortalCapture, ScreenshotData,
+};
 pub use inputctl_capture::{
-    capture_screenshot, capture_screenshot_image, capture_screenshot_simple, find_cursor,
-    find_window, get_screen_dimensions, list_windows, run_recorder, CursorPos, Encoder,
-    RecorderConfig, Region, ScreenDimensions, ScreenshotOptions, Window,
+    find_cursor, find_window, get_screen_dimensions, list_windows, run_recorder, CursorPos,
+    Encoder, RecorderConfig, Region, ScreenDimensions, ScreenshotOptions, Window,
 };
 
 use crate::debugger::{AgentObserver, NoopObserver};
 use llm::LlmClient;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 /// Virtual vision controller for screen capture, LLM queries, and GUI automation
 pub struct VisionCtl {
@@ -161,17 +189,34 @@ impl VisionCtl {
 
     /// Capture a screenshot and return PNG bytes (static method)
     pub fn screenshot() -> Result<Vec<u8>> {
-        Ok(capture_screenshot_simple()?)
+        let data = capture_with_options(ScreenshotOptions::default())?;
+        Ok(data.png_bytes)
     }
 
     /// Capture raw screenshot (static method)
-    pub fn screenshot_raw(width: u32, height: u32) -> Result<Vec<u8>> {
-        Ok(inputctl_capture::primitives::screenshot::capture_screenshot_raw(width, height)?)
+    pub fn screenshot_raw(_width: u32, _height: u32) -> Result<Vec<u8>> {
+        let mut capture = pipewire_capture()?;
+        Ok(capture_screenshot_raw_with_source(
+            &mut *capture,
+            CAPTURE_TIMEOUT,
+        )?)
     }
 
     /// Capture raw screenshot with cropping (static method)
     pub fn screenshot_raw_cropped(region: Option<Region>) -> Result<(Vec<u8>, u32, u32)> {
-        Ok(inputctl_capture::primitives::screenshot::capture_screenshot_raw_cropped(region)?)
+        let mut capture = pipewire_capture()?;
+        let img = capture_screenshot_image_with_source(
+            &mut *capture,
+            ScreenshotOptions {
+                mark_cursor: false,
+                crop_region: region,
+                resize_to_logical: None,
+            },
+            CAPTURE_TIMEOUT,
+        )?;
+        let width = img.width();
+        let height = img.height();
+        Ok((img.into_raw(), width, height))
     }
 
     pub fn screenshot_with_cursor(&self) -> Result<Vec<u8>> {
@@ -181,7 +226,7 @@ impl VisionCtl {
             crop_region: self.viewport,
             resize_to_logical: Some((dims.width, dims.height)),
         };
-        let data = capture_screenshot(options)?;
+        let data = capture_with_options(options)?;
         Ok(data.png_bytes)
     }
 

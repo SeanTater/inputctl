@@ -8,7 +8,7 @@ use crate::debugger::{AgentObserver, Iteration, NoopObserver};
 use crate::error::Result;
 use crate::llm::{execute_tool, get_action_tools, LlmClient, LlmConfig, Message};
 use crate::VisionCtl;
-use inputctl_capture::{capture_screenshot, get_screen_dimensions, ScreenshotOptions};
+use inputctl_capture::{get_screen_dimensions, ScreenshotOptions};
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
@@ -137,7 +137,7 @@ impl Agent {
             crop_region: self.ctl.get_viewport(),
             resize_to_logical: Some((dims.width, dims.height)),
         };
-        let data = capture_screenshot(options)?;
+        let data = crate::capture_with_options(options)?;
         Ok(data.png_bytes)
     }
 
@@ -149,7 +149,7 @@ impl Agent {
             crop_region: None,
             resize_to_logical: Some((dims.width, dims.height)),
         };
-        let data = capture_screenshot(options)?;
+        let data = crate::capture_with_options(options)?;
         Ok(data.png_bytes)
     }
 

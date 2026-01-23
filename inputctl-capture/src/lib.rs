@@ -20,8 +20,8 @@ pub use primitives::{
     capture_screenshot_image_with_source, capture_screenshot_raw_with_source,
     capture_screenshot_simple, capture_screenshot_with_source,
     capture_screenshot_with_source_default_timeout, find_cursor, find_window,
-    get_screen_dimensions, list_windows, CursorPos, Region, ScreenDimensions, ScreenshotOptions,
-    Window,
+    get_screen_dimensions, list_windows, CursorPos, Region, ScreenDimensions, ScreenshotData,
+    ScreenshotOptions, Window,
 };
 pub use recorder::{
     run_recorder, run_recorder_with_sources, Encoder, FrameTiming, InputEvent, InputEventSource,

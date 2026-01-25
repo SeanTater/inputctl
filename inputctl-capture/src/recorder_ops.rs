@@ -5,7 +5,22 @@ use crate::recorder::{
     InputEventSource, RecorderConfig, RecorderSummary, VideoWriter,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn request_stop() {
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn reset_stop() {
+    STOP_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+pub(crate) fn stop_requested() -> bool {
+    STOP_REQUESTED.load(Ordering::SeqCst)
+}
 
 pub fn pipewire_to_ffmpeg_format(format: &str) -> (&'static str, Option<&str>) {
     match format {
@@ -103,6 +118,9 @@ pub fn run_capture_loop(
             if elapsed.as_secs() >= limit {
                 break;
             }
+        }
+        if stop_requested() {
+            break;
         }
 
         let mut now = clock.now();

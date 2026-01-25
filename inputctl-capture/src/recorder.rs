@@ -1,9 +1,10 @@
 use crate::capture::{CaptureFrame, FrameSource, PortalCapture};
 use crate::error::{Error, Result};
 use crate::recorder_ops::{
-    build_ffmpeg_args, normalize_even_dimensions, pipewire_to_ffmpeg_format, run_capture_loop,
-    write_summary_outputs,
+    build_ffmpeg_args, normalize_even_dimensions, pipewire_to_ffmpeg_format, request_stop,
+    reset_stop, run_capture_loop, write_summary_outputs,
 };
+
 use arrow::array::{Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -268,23 +269,32 @@ pub(crate) fn write_inputs_parquet(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let schema = Schema::new(vec![
         Field::new("timestamp", DataType::Int64, false),
-        Field::new("key_code", DataType::Int32, false),
-        Field::new("key_name", DataType::Utf8, false),
-        Field::new("state", DataType::Utf8, false),
+        Field::new("event_type", DataType::Utf8, false),
+        Field::new("key_code", DataType::Int32, true),
+        Field::new("key_name", DataType::Utf8, true),
+        Field::new("state", DataType::Utf8, true),
+        Field::new("x", DataType::Int32, true),
+        Field::new("y", DataType::Int32, true),
     ]);
 
     let timestamps: Vec<i64> = events.iter().map(|e| e.timestamp as i64).collect();
-    let key_codes: Vec<i32> = events.iter().map(|e| e.key_code as i32).collect();
-    let key_names: Vec<&str> = events.iter().map(|e| e.key_name.as_str()).collect();
-    let states: Vec<&str> = events.iter().map(|e| e.state).collect();
+    let event_types: Vec<&str> = events.iter().map(|_| "key").collect();
+    let key_codes: Vec<Option<i32>> = events.iter().map(|e| Some(e.key_code as i32)).collect();
+    let key_names: Vec<Option<&str>> = events.iter().map(|e| Some(e.key_name.as_str())).collect();
+    let states: Vec<Option<&str>> = events.iter().map(|e| Some(e.state)).collect();
+    let xs: Vec<Option<i32>> = events.iter().map(|_| None).collect();
+    let ys: Vec<Option<i32>> = events.iter().map(|_| None).collect();
 
     let batch = RecordBatch::try_new(
         Arc::new(schema.clone()),
         vec![
             Arc::new(Int64Array::from(timestamps)),
+            Arc::new(StringArray::from(event_types)),
             Arc::new(Int32Array::from(key_codes)),
             Arc::new(StringArray::from(key_names)),
             Arc::new(StringArray::from(states)),
+            Arc::new(Int32Array::from(xs)),
+            Arc::new(Int32Array::from(ys)),
         ],
     )?;
 
@@ -358,6 +368,8 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
         ));
     }
 
+    reset_stop();
+
     let device = if let Some(path) = config.device_path.clone() {
         Device::open(&path)
             .map_err(|e| Error::ScreenshotFailed(format!("Failed to open device: {}", e)))?
@@ -389,6 +401,9 @@ pub fn run_recorder(config: RecorderConfig) -> Result<()> {
     println!("Recording to: {}", session_dir.display());
 
     let mut capture = PortalCapture::connect(None)?;
+    let _ = ctrlc::set_handler(|| {
+        request_stop();
+    });
     let mut input_source = EvdevInputSource::new(device);
     let mut clock = SystemClock;
 
